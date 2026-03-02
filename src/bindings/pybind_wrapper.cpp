@@ -87,6 +87,23 @@ public:
     return sliced;
   }
 
+  std::shared_ptr<MarketDataBuffer>
+  filter_by_instrument(uint32_t instrument_id) const {
+    auto filtered = std::make_shared<MarketDataBuffer>();
+    for (const auto &tick : data) {
+      if (tick.instrument_id == instrument_id) {
+        filtered->append(tick);
+      }
+    }
+    return filtered;
+  }
+
+  void sort_buffer() {
+    std::sort(data.begin(), data.end(), [](const OHLCV &a, const OHLCV &b) {
+      return a.timestamp < b.timestamp;
+    });
+  }
+
   BacktestStats run_backtest(double initial_capital, double order_size,
                              bool size_is_percentage, double commission,
                              bool commission_is_percentage,
@@ -106,7 +123,8 @@ PYBIND11_MODULE(chimera_core, m) {
   m.doc() = "Chimera Quant Core Engine";
 
   // Register custom NumPy dtype for OHLCV
-  PYBIND11_NUMPY_DTYPE(OHLCV, timestamp, open, high, low, close, volume);
+  PYBIND11_NUMPY_DTYPE(OHLCV, timestamp, open, high, low, close, volume,
+                       instrument_id);
 
   py::class_<OHLCV>(m, "OHLCV")
       .def(py::init<>())
@@ -115,7 +133,8 @@ PYBIND11_MODULE(chimera_core, m) {
       .def_readwrite("high", &OHLCV::high)
       .def_readwrite("low", &OHLCV::low)
       .def_readwrite("close", &OHLCV::close)
-      .def_readwrite("volume", &OHLCV::volume);
+      .def_readwrite("volume", &OHLCV::volume)
+      .def_readwrite("instrument_id", &OHLCV::instrument_id);
 
   py::class_<BacktestStats>(m, "BacktestStats")
       .def_readonly("net_profit_usd", &BacktestStats::net_profit_usd)
@@ -129,8 +148,11 @@ PYBIND11_MODULE(chimera_core, m) {
       .def(py::init<size_t>(), py::arg("reserve_size") = 100000)
       .def("append", &MarketDataBuffer::append)
       .def("load_dbn", &MarketDataBuffer::load_dbn, py::arg("filepath"))
+      .def("sort_buffer", &MarketDataBuffer::sort_buffer)
       .def("resample", &MarketDataBuffer::resample, py::arg("interval_minutes"))
       .def("slice", &MarketDataBuffer::slice, py::arg("start"), py::arg("end"))
+      .def("filter_by_instrument", &MarketDataBuffer::filter_by_instrument,
+           py::arg("instrument_id"))
       .def("run_backtest", &MarketDataBuffer::run_backtest,
            py::arg("initial_capital"), py::arg("order_size"),
            py::arg("size_is_percentage"), py::arg("commission"),

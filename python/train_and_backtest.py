@@ -72,8 +72,23 @@ def main():
     for f in dbn_files:
         data_engine.load_dbn(f)
         
+    print("\n--- Chronologically Aligning Numpy Array Memory ---")
+    data_engine.sort_buffer()
+        
     total_ticks = len(data_engine.get_buffer_view())
     print(f"Loaded {total_ticks} ticks natively mapped to NumPy.")
+    
+    view = data_engine.get_buffer_view()
+    if 'instrument_id' in view.dtype.names:
+        instrument_ids = np.unique(view['instrument_id'])
+        print(f"Found {len(instrument_ids)} unique instruments: {instrument_ids}")
+        
+        if len(instrument_ids) >= 1:
+            target_id = int(instrument_ids[0])
+            print(f"Filtering dataset to target instrument ID: {target_id}")
+            data_engine = data_engine.filter_by_instrument(target_id)
+            total_ticks = len(data_engine.get_buffer_view())
+            print(f"Filtered down to {total_ticks} ticks for isolated metric analysis.")
 
     if total_ticks < 100:
         print("Not enough data to train/backtest. Exiting.")
@@ -95,10 +110,10 @@ def main():
 
     print("\n--- Initializing Strategies ---")
     strategies_list = [s.strip().lower() for s in args.strategies.split(",")]
-    signals = [0] * total_ticks
-    train_size = int(total_ticks * 0.8)
+    signals = np.zeros(total_ticks, dtype=np.int32)
     
     if "ai" in strategies_list:
+        train_size = int(total_ticks * 0.8)
         ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
         
         if args.mode == "train":
@@ -131,21 +146,27 @@ def main():
             for i in range(train_size, total_ticks):
                 ai_strategy.buffer = data_engine.slice(i - ai_strategy.window_size, i + 1)
                 sig = ai_strategy.evaluate()
-                if sig:
+                if sig != 0:
                     signals[i] = sig
 
     else:
         # Standard Indicator Logic (No PyTorch Initialization)
-        print("\n--- Generating Standard Indicator Predictions ---")
+        print("\n--- Generating Standard Indicator Predictions (Vectorized) ---")
         if "rsi" in strategies_list:
             from python.strategies.indicators import Indicators
             rsi_array = Indicators.rsi(data_engine, timeperiod=14)
-            for i in range(train_size, total_ticks):
-                if i < len(rsi_array) and not np.isnan(rsi_array[i]):
-                    if rsi_array[i] < 30:
-                        signals[i] = 1
-                    elif rsi_array[i] > 70:
-                        signals[i] = -1
+            if len(rsi_array) > 0:
+                valid_idx = ~np.isnan(rsi_array)
+                signals[valid_idx & (rsi_array < 30)] = 1
+                signals[valid_idx & (rsi_array > 70)] = -1
+                
+        elif "macd" in strategies_list:
+            from python.strategies.indicators import Indicators
+            macd, macdsignal, macdhist = Indicators.macd(data_engine)
+            if len(macd) > 0:
+                valid_idx = ~np.isnan(macd) & ~np.isnan(macdsignal)
+                signals[valid_idx & (macd > macdsignal)] = 1
+                signals[valid_idx & (macd < macdsignal)] = -1
 
     if args.mode == "backtest":
         print("\n--- Executing C++ Strategy Logic Simulator ---")
@@ -161,7 +182,7 @@ def main():
             slippage_penalty=args.slippage,
             start_timestamp=start_ns,
             end_timestamp=end_ns,
-            signals=signals
+            signals=signals.tolist()
         )
         
         print(f"\n[BACKTEST RESULTS]")

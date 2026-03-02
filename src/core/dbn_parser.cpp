@@ -88,13 +88,10 @@ void DbnParser::parse_zstd_dbn(const std::string &filepath,
         decompressed_data.data() + offset);
     size_t record_bytes = header->length * 4;
 
-    if (offset + record_bytes > decompressed_data.size()) {
-      break;
-    }
-
-    // Filter based on typical OHLCV record size (56 bytes) and ensure length
-    // matches
-    if (record_bytes == sizeof(DbnOhlcvMsg)) {
+    // Filter based on OHLCV schema type (rtype 32=1s, 33=1m, 34=1h, 35=1d) and
+    // struct size matching
+    if (header->rtype >= 32 && header->rtype <= 35 &&
+        record_bytes == sizeof(DbnOhlcvMsg)) {
       const DbnOhlcvMsg *msg = reinterpret_cast<const DbnOhlcvMsg *>(
           decompressed_data.data() + offset);
       OHLCV ohlcv;
@@ -106,6 +103,7 @@ void DbnParser::parse_zstd_dbn(const std::string &filepath,
       ohlcv.low = static_cast<double>(msg->low) / 1e9;
       ohlcv.close = static_cast<double>(msg->close) / 1e9;
       ohlcv.volume = msg->volume;
+      ohlcv.instrument_id = header->instrument_id;
 
       // Basic sanity check to avoid weird data
       if (ohlcv.close > 0.0 && ohlcv.high >= ohlcv.low) {

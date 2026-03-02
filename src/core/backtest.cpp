@@ -41,11 +41,15 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
       [](const OHLCV &t, uint64_t ts) { return t.timestamp < ts; });
   size_t start_idx = std::distance(data.begin(), start_it);
 
+  size_t last_valid_idx = start_idx < data.size() ? start_idx : 0;
+
   for (size_t i = start_idx; i < data.size(); ++i) {
     const auto &tick = data[i];
 
     if (tick.timestamp > end_timestamp)
       break;
+
+    last_valid_idx = i;
 
     int signal = (i > 0) ? signals[i - 1] : 0;
 
@@ -94,9 +98,10 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
     last_equity = current_marked_equity;
   }
 
-  // Close remaining position at the end of simulation
-  if (position_shares > 0) {
-    double exit_price = data.back().close * (1.0 - slippage_penalty);
+  // Close remaining position at the end of simulation using the exact last
+  // processed timestamp
+  if (position_shares > 0 && last_valid_idx < data.size()) {
+    double exit_price = data[last_valid_idx].close * (1.0 - slippage_penalty);
     double trade_value = position_shares * exit_price;
     double fee =
         commission_is_percentage ? (trade_value * commission) : commission;
