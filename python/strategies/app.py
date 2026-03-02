@@ -1,15 +1,14 @@
 import os
-import sys
+from dotenv import load_dotenv
 
-# Ensure CMake build output is in PYTHONPATH for the chimera_core C++ module
-BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "build")
-sys.path.append(BUILD_DIR)
-
+import chimera_core
 from python.strategies.model import AIStrategy
 from python.strategies.live_data import MarketDataEngine
 from python.strategies.executor import TradeExecutor
 from python.storage.cache import EvaluationCache
 from python.strategies.llm_sentiment import LLMSentimentAnalyzer
+
+load_dotenv()
 
 def main():
     print("=========================================")
@@ -26,8 +25,12 @@ def main():
     ai_strategy.buffer = data_engine.buffer
     
     # 3. Initialize Execution System & Caches
-    API_KEY = "PKOO9VTOEYVG4EBIIXXA"
-    SECRET_KEY = "OLqMI9JtYfHbruwyzFDSMs9cmAdug5kAwFZJjyrJ"
+    API_KEY = os.getenv("APCA_API_KEY_ID")
+    SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
+    
+    if not API_KEY or not SECRET_KEY:
+        raise ValueError("CRITICAL: Alpaca API keys are missing from the environment. Securely set APCA_API_KEY_ID and APCA_API_SECRET_KEY in a .env file.")
+
     executor = TradeExecutor(api_key=API_KEY, secret_key=SECRET_KEY, paper=True)
     cache = EvaluationCache()
     llm = LLMSentimentAnalyzer(model_name="llama3")

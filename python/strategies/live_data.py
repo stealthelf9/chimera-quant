@@ -6,9 +6,15 @@ from alpaca.data.models.trades import Trade
 from alpaca.data.enums import DataFeed
 import chimera_core
 
-# Alpaca Credentials provided in instructions
-API_KEY = "PKOO9VTOEYVG4EBIIXXA"
-SECRET_KEY = "OLqMI9JtYfHbruwyzFDSMs9cmAdug5kAwFZJjyrJ"
+# Load Alpaca Credentials securely
+from dotenv import load_dotenv
+load_dotenv()
+
+API_KEY = os.getenv("APCA_API_KEY_ID")
+SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
+
+if not API_KEY or not SECRET_KEY:
+    raise ValueError("CRITICAL: Alpaca API keys are missing from the environment. Securely set APCA_API_KEY_ID and APCA_API_SECRET_KEY in a .env file.")
 
 # Top 10 Mega-Caps for live trading constraint
 MEGA_CAPS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "LLY", "V"]

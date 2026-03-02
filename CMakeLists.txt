@@ -28,3 +28,11 @@ pybind11_add_module(chimera_core src/bindings/pybind_wrapper.cpp src/core/dbn_pa
 target_include_directories(chimera_core PRIVATE src/core ${ZSTD_INCLUDE_DIRS})
 target_link_libraries(chimera_core PRIVATE ${ZSTD_LIBRARIES})
 
+# Copy the compiled pybind11 extension into the `python/` directory seamlessly
+add_custom_command(TARGET chimera_core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:chimera_core>
+    ${CMAKE_SOURCE_DIR}/python/$<TARGET_FILE_NAME:chimera_core>
+    COMMENT "Deploying natively compiled chimera_core to python/ modules folder"
+)
+
