@@ -1,3 +1,4 @@
+#include "../core/dbn_parser.h"
 #include "../core/types.h"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -25,6 +26,11 @@ public:
     );
   }
 
+  // Load data from DBN ZSTD file
+  void load_dbn(const std::string &filepath) {
+    DbnParser::parse_zstd_dbn(filepath, data);
+  }
+
   std::vector<OHLCV> data;
 };
 
@@ -46,6 +52,7 @@ PYBIND11_MODULE(chimera_core, m) {
   py::class_<MarketDataBuffer>(m, "MarketDataBuffer")
       .def(py::init<size_t>(), py::arg("reserve_size") = 100000)
       .def("append", &MarketDataBuffer::append)
+      .def("load_dbn", &MarketDataBuffer::load_dbn, py::arg("filepath"))
       .def("get_buffer_view", &MarketDataBuffer::get_buffer_view,
            py::return_value_policy::reference_internal);
 }
