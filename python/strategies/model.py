@@ -34,6 +34,58 @@ class AIStrategy(BaseStrategy):
         # Local state
         self.window_size = self.params.get('window_size', 60) # 60 minutes lookback
 
+    def train(self, epochs: int = 5, batch_size: int = 64, learning_rate: float = 0.001):
+        """
+        Trains the PyTorch model natively on the structured C++ zero-copy buffer.
+        """
+        view = self.buffer.get_buffer_view()
+        if len(view) < self.window_size + 1:
+            print(f"[{self.name}] Not enough data to train. Need {self.window_size + 1}, got {len(view)}")
+            return
+            
+        print(f"[{self.name}] Preparing training data from {len(view)} ticks...")
+        # Extract features natively
+        features = np.column_stack((
+            view['open'],
+            view['high'],
+            view['low'],
+            view['close'],
+            view['volume']
+        )).astype(np.float32)
+
+        # Normalize features (simple min-max or std scaling could be here, omitted for brevity)
+        X, y = [], []
+        for i in range(len(features) - self.window_size):
+            X.append(features[i:i+self.window_size])
+            # Target is the close price of the next tick
+            # We predict the future close price
+            y.append([features[i+self.window_size, 3]])
+            
+        X = torch.tensor(np.array(X)).to(self.device)
+        y = torch.tensor(np.array(y)).to(self.device)
+        
+        dataset = torch.utils.data.TensorDataset(X, y)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+        criterion = nn.MSELoss()
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
+        
+        self.model.train()
+        print(f"[{self.name}] Starting Training (Device: {self.device})")
+        for epoch in range(epochs):
+            total_loss = 0
+            for batch_X, batch_y in dataloader:
+                optimizer.zero_grad()
+                outputs = self.model(batch_X)
+                loss = criterion(outputs, batch_y)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            print(f"[{self.name}] Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dataloader):.4f}")
+
+        self.model.eval()
+        print(f"[{self.name}] Training Complete.")
+
     def evaluate(self):
         # We need at least window_size ticks to make a prediction
         view = self.buffer.get_buffer_view()
@@ -63,7 +115,9 @@ class AIStrategy(BaseStrategy):
         current_price = recent_data[-1]['close']
         
         # Basic logic (Replace with real logic)
+        # We need to return the signal back to the testing pipeline natively
         if pred_value > current_price * 1.001:
-            print(f"[{self.name}] AI Signal: BUY at {current_price:.2f} (Target: {pred_value:.2f})")
+            return 1 # BUY
         elif pred_value < current_price * 0.999:
-            print(f"[{self.name}] AI Signal: SELL at {current_price:.2f} (Target: {pred_value:.2f})")
+            return -1 # SELL
+        return 0 # HOLD

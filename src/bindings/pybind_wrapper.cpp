@@ -74,6 +74,19 @@ public:
     return resampled;
   }
 
+  std::shared_ptr<MarketDataBuffer> slice(size_t start, size_t end) const {
+    if (start >= data.size())
+      start = data.size();
+    if (end > data.size())
+      end = data.size();
+    auto sliced =
+        std::make_shared<MarketDataBuffer>(end > start ? end - start : 0);
+    if (start < end) {
+      sliced->data.assign(data.begin() + start, data.begin() + end);
+    }
+    return sliced;
+  }
+
   BacktestStats run_backtest(double initial_capital, double order_size,
                              bool size_is_percentage, double commission,
                              bool commission_is_percentage,
@@ -117,6 +130,7 @@ PYBIND11_MODULE(chimera_core, m) {
       .def("append", &MarketDataBuffer::append)
       .def("load_dbn", &MarketDataBuffer::load_dbn, py::arg("filepath"))
       .def("resample", &MarketDataBuffer::resample, py::arg("interval_minutes"))
+      .def("slice", &MarketDataBuffer::slice, py::arg("start"), py::arg("end"))
       .def("run_backtest", &MarketDataBuffer::run_backtest,
            py::arg("initial_capital"), py::arg("order_size"),
            py::arg("size_is_percentage"), py::arg("commission"),
