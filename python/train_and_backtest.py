@@ -43,14 +43,11 @@ def main():
     print("=========================================")
     
     data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-    extracted_dir = os.path.join(data_dir, "extracted")
     
-    dbn_files = []
-    if os.path.exists(extracted_dir):
-        dbn_files = [os.path.join(extracted_dir, f) for f in os.listdir(extracted_dir) if f.endswith(".dbn.zst")]
+    dbn_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".dbn.zst")]
         
     if not dbn_files:
-        print("No extracted dbn.zst files found. Inspecting ZIPs...")
+        print("No .dbn.zst files found in data/. Inspecting ZIPs...")
         zip_files = [f for f in os.listdir(data_dir) if f.endswith(".zip")]
         if not zip_files:
             print("No Databento ZIPs or extracted data found in data/.")
@@ -61,9 +58,9 @@ def main():
         with zipfile.ZipFile(zip_path, 'r') as zf:
             for name in zf.namelist():
                 if name.endswith(".dbn.zst"):
-                    print(f"Extracting {name} to data/extracted/...")
-                    zf.extract(name, path=extracted_dir)
-                    dbn_files.append(os.path.join(extracted_dir, name))
+                    print(f"Extracting {name} to data/...")
+                    zf.extract(name, path=data_dir)
+                    dbn_files.append(os.path.join(data_dir, name))
 
     if not dbn_files:
         print("No .dbn.zst files available.")
