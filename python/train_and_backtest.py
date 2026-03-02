@@ -4,6 +4,7 @@ import zipfile
 import argparse
 from datetime import datetime
 import numpy as np
+import databento as db
 
 # Ensure CMake build output is in PYTHONPATH for the chimera_core C++ module
 BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "build")
@@ -70,6 +71,14 @@ def main():
 
     print("\n--- Loading Data to Zero-Copy Buffer ---")
     data_engine = chimera_core.MarketDataBuffer(10000000)
+    
+    print("Extracting symbology mappings from Databento...")
+    store = db.DBNStore.from_file(dbn_files[0])
+    ticker_map = {}
+    for ticker, mappings in store.mappings.items():
+        if mappings:
+            ticker_map[ticker.upper()] = int(mappings[0]["symbol"])
+            
     for f in dbn_files:
         data_engine.load_dbn(f)
         
@@ -95,7 +104,31 @@ def main():
         instrument_ids, counts = np.unique(window_view['instrument_id'], return_counts=True)
         print(f"Found {len(instrument_ids)} unique instruments in timeframe.")
         
-        if len(instrument_ids) >= 1:
+        if args.symbols != "ALL":
+            target_tickers = [s.strip().upper() for s in args.symbols.split(",")]
+            target_ids = []
+            for t in target_tickers:
+                if t in ticker_map:
+                    target_ids.append(ticker_map[t])
+                else:
+                    print(f"Warning: Ticker {t} not found in DB symbology.")
+                    
+            if not target_ids:
+                print("No valid target instruments found to filter. Exiting.")
+                return
+                
+            # Use the first parsed instrument ID for the C++ Backtest Simulator
+            target_id = target_ids[0]
+            if len(target_ids) > 1:
+                print(f"Note: Current C++ engine isolates 1 instrument per analysis sequence. Using {target_tickers[0]} (ID: {target_id})")
+            else:
+                print(f"Filtering down to target instrument: {target_tickers[0]} (ID: {target_id})")
+                
+            data_engine = data_engine.filter_by_instrument(target_id)
+            total_ticks = len(data_engine.get_buffer_view())
+            print(f"Filtered down to {total_ticks} ticks for isolated metric analysis.")
+            
+        elif len(instrument_ids) >= 1:
             target_id = int(instrument_ids[np.argmax(counts)])
             print(f"Auto-selected most active instrument ID: {target_id} with {np.max(counts)} ticks in timeframe.")
             data_engine = data_engine.filter_by_instrument(target_id)
