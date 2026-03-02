@@ -36,20 +36,22 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
   std::vector<double> daily_returns;
   double last_equity = equity;
 
-  for (size_t i = 0; i < data.size(); ++i) {
+  auto start_it = std::lower_bound(
+      data.begin(), data.end(), start_timestamp,
+      [](const OHLCV &t, uint64_t ts) { return t.timestamp < ts; });
+  size_t start_idx = std::distance(data.begin(), start_it);
+
+  for (size_t i = start_idx; i < data.size(); ++i) {
     const auto &tick = data[i];
 
-    // Filter by date
-    if (tick.timestamp < start_timestamp)
-      continue;
     if (tick.timestamp > end_timestamp)
       break;
 
-    int signal = signals[i];
+    int signal = (i > 0) ? signals[i - 1] : 0;
 
     // Close position
     if (signal == -1 && position_shares > 0) {
-      double exit_price = tick.close * (1.0 - slippage_penalty);
+      double exit_price = tick.open * (1.0 - slippage_penalty);
       double trade_value = position_shares * exit_price;
       double fee =
           commission_is_percentage ? (trade_value * commission) : commission;
@@ -66,7 +68,7 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
     }
     // Open position
     else if (signal == 1 && position_shares == 0) {
-      double ask_price = tick.close * (1.0 + slippage_penalty);
+      double ask_price = tick.open * (1.0 + slippage_penalty);
       double investment = size_is_percentage ? (equity * order_size)
                                              : std::min(order_size, equity);
 
@@ -99,6 +101,11 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
     double fee =
         commission_is_percentage ? (trade_value * commission) : commission;
     equity += (trade_value - fee);
+
+    double trade_profit = (exit_price - entry_price) * position_shares - fee;
+    if (trade_profit > 0)
+      winning_trades++;
+    total_trades++;
   }
 
   // Net Profit Calculations

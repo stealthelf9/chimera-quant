@@ -53,13 +53,20 @@ class AIStrategy(BaseStrategy):
             view['volume']
         )).astype(np.float32)
 
-        # Normalize features (simple min-max or std scaling could be here, omitted for brevity)
+        # Standardize features (Z-Score Normalization)
+        self.feature_mean = np.mean(features, axis=0)
+        self.feature_std = np.std(features, axis=0)
+        self.feature_std[self.feature_std == 0] = 1.0 # Prevent div by zero
+        features = (features - self.feature_mean) / self.feature_std
+
         X, y = [], []
         for i in range(len(features) - self.window_size):
             X.append(features[i:i+self.window_size])
-            # Target is the close price of the next tick
-            # We predict the future close price
-            y.append([features[i+self.window_size, 3]])
+            # Target prediction is the percentage return of the next tick close vs current
+            curr_close = view['close'][i + self.window_size - 1]
+            next_close = view['close'][i + self.window_size]
+            pct_return = (next_close - curr_close) / curr_close if curr_close != 0 else 0
+            y.append([pct_return])
             
         X = torch.tensor(np.array(X)).to(self.device)
         y = torch.tensor(np.array(y)).to(self.device)
@@ -105,19 +112,20 @@ class AIStrategy(BaseStrategy):
             recent_data['volume']
         )).astype(np.float32)
 
+        if hasattr(self, 'feature_mean') and hasattr(self, 'feature_std'):
+            features = (features - self.feature_mean) / self.feature_std
+
         # Reshape for LSTM: (batch_size, sequence_length, input_size)
         x_tensor = torch.tensor(features).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
             prediction = self.model(x_tensor)
             
-        pred_value = prediction.item()
-        current_price = recent_data[-1]['close']
+        pred_return = prediction.item()
         
-        # Basic logic (Replace with real logic)
-        # We need to return the signal back to the testing pipeline natively
-        if pred_value > current_price * 1.001:
+        # Basic logic: Returns predicted natively
+        if pred_return > 0.001: # Expected > 0.1% gain
             return 1 # BUY
-        elif pred_value < current_price * 0.999:
+        elif pred_return < -0.001: # Expected < -0.1% loss
             return -1 # SELL
         return 0 # HOLD
