@@ -7,16 +7,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # High-performance compiler flags (optimized for AMD Ryzen/Zen-architecture)
 set(CMAKE_CXX_FLAGS "-O3 -march=native -flto -fPIC -Wall -Wextra")
 
+# 1. MUST find Python first so it knows what environment to bind to
 find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 
-# Fetch pybind11 if not installed globally
-include(FetchContent)
-FetchContent_Declare(
-  pybind11
-  GIT_REPOSITORY https://github.com/pybind/pybind11.git
-  GIT_TAG        v2.11.1
+# 2. Ask the .venv Python exactly where the pybind11 CMake files are hiding
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "import pybind11; print(pybind11.get_cmake_dir())"
+    OUTPUT_VARIABLE pybind11_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
 )
-FetchContent_MakeAvailable(pybind11)
+
+# 3. Now link it securely
+find_package(pybind11 REQUIRED)
 
 # Find libzstd
 find_package(PkgConfig REQUIRED)
