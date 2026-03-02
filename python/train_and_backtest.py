@@ -25,6 +25,9 @@ def parse_args():
     parser.add_argument("--position-size", type=float, default=0.1, help="Position size (0.1 = 10 percent of portfolio)")
     parser.add_argument("--slippage", type=float, default=0.005, help="Slippage penalty")
     parser.add_argument("--commission", type=str, default="2.5", help="Commission per trade (e.g., '1.5' for $1.5 flat, or '1.5%%' for 1.5% percentage default)")
+    parser.add_argument("--stop-loss", type=float, default=0.05, help="Stop loss percentage (e.g., 0.05 for 5%)")
+    parser.add_argument("--take-profit", type=float, default=0.10, help="Take profit percentage (e.g., 0.10 for 10%)")
+    parser.add_argument("--shorting", action="store_true", help="Enable short selling")
     return parser.parse_args()
 
 def date_to_nanos(date_str: str) -> int:
@@ -271,6 +274,9 @@ def main():
             slippage_penalty=args.slippage,
             start_timestamp=start_ns,
             end_timestamp=end_ns,
+            stop_loss_pct=args.stop_loss,
+            take_profit_pct=args.take_profit,
+            allow_shorts=args.shorting,
             signals=signals
         )
         

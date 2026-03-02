@@ -108,12 +108,14 @@ public:
                              bool size_is_percentage, double commission,
                              bool commission_is_percentage,
                              double slippage_penalty, uint64_t start_timestamp,
-                             uint64_t end_timestamp,
+                             uint64_t end_timestamp, double stop_loss_pct,
+                             double take_profit_pct, bool allow_shorts,
                              const std::vector<int> &signals) {
     BacktestSimulator sim(data);
     return sim.run(initial_capital, order_size, size_is_percentage, commission,
                    commission_is_percentage, slippage_penalty, start_timestamp,
-                   end_timestamp, signals);
+                   end_timestamp, stop_loss_pct, take_profit_pct, allow_shorts,
+                   signals);
   }
 
   std::vector<OHLCV> data;
@@ -159,7 +161,8 @@ PYBIND11_MODULE(chimera_core, m) {
            py::arg("size_is_percentage"), py::arg("commission"),
            py::arg("commission_is_percentage"), py::arg("slippage_penalty"),
            py::arg("start_timestamp"), py::arg("end_timestamp"),
-           py::arg("signals"))
+           py::arg("stop_loss_pct"), py::arg("take_profit_pct"),
+           py::arg("allow_shorts"), py::arg("signals"))
       .def("get_buffer_view", &MarketDataBuffer::get_buffer_view,
            py::return_value_policy::reference_internal);
 }

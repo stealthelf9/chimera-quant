@@ -29,7 +29,8 @@ public:
       double order_size, // Fixed dollar or % logic to be implemented
       bool size_is_percentage, double commission, bool commission_is_percentage,
       double slippage_penalty, // Example: 0.005 (50 bps)
-      uint64_t start_timestamp, uint64_t end_timestamp,
+      uint64_t start_timestamp, uint64_t end_timestamp, double stop_loss_pct,
+      double take_profit_pct, bool allow_shorts,
       const std::vector<int> &signals // Example logic: 1 is BUY, -1 is SELL, 0
                                       // HOLD. Shape matches buffer.
   );

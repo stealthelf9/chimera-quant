@@ -8,13 +8,13 @@ namespace chimera {
 BacktestSimulator::BacktestSimulator(std::vector<OHLCV> &buffer_ref)
     : data(buffer_ref) {}
 
-BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
-                                     bool size_is_percentage, double commission,
-                                     bool commission_is_percentage,
-                                     double slippage_penalty,
-                                     uint64_t start_timestamp,
-                                     uint64_t end_timestamp,
-                                     const std::vector<int> &signals) {
+BacktestStats
+BacktestSimulator::run(double initial_capital, double order_size,
+                       bool size_is_percentage, double commission,
+                       bool commission_is_percentage, double slippage_penalty,
+                       uint64_t start_timestamp, uint64_t end_timestamp,
+                       double stop_loss_pct, double take_profit_pct,
+                       bool allow_shorts, const std::vector<int> &signals) {
 
   BacktestStats stats{};
   if (data.empty() || signals.size() != data.size()) {
@@ -30,6 +30,7 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
   int total_trades = 0;
   int winning_trades = 0;
 
+  int position_type = 0; // 1 = Long, -1 = Short, 0 = Flat
   double position_shares = 0;
   double entry_price = 0;
 
@@ -53,41 +54,136 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
 
     int signal = (i > 0) ? signals[i - 1] : 0;
 
-    // Close position
-    if (signal == -1 && position_shares > 0) {
-      double exit_price = tick.open * (1.0 - slippage_penalty);
+    // --- Risk Management (SL / TP) ---
+    bool risk_triggered = false;
+    double exit_price = 0.0;
+
+    if (position_type == 1 && position_shares > 0) {
+      double sl_price = entry_price * (1.0 - stop_loss_pct);
+      double tp_price = entry_price * (1.0 + take_profit_pct);
+      if (tick.low <= sl_price) {
+        exit_price = sl_price * (1.0 - slippage_penalty);
+        risk_triggered = true;
+      } else if (tick.high >= tp_price) {
+        exit_price = tp_price * (1.0 - slippage_penalty);
+        risk_triggered = true;
+      }
+    } else if (position_type == -1 && position_shares > 0) {
+      double sl_price = entry_price * (1.0 + stop_loss_pct);
+      double tp_price = entry_price * (1.0 - take_profit_pct);
+      if (tick.high >= sl_price) {
+        exit_price = sl_price * (1.0 + slippage_penalty);
+        risk_triggered = true;
+      } else if (tick.low <= tp_price) {
+        exit_price = tp_price * (1.0 + slippage_penalty);
+        risk_triggered = true;
+      }
+    }
+
+    if (risk_triggered) {
       double trade_value = position_shares * exit_price;
       double fee =
           commission_is_percentage ? (trade_value * commission) : commission;
 
-      equity += (trade_value - fee);
+      double trade_profit = 0;
+      if (position_type == 1) {
+        equity += (trade_value - fee);
+        trade_profit = (exit_price - entry_price) * position_shares - fee;
+      } else if (position_type == -1) {
+        trade_profit = (entry_price - exit_price) * position_shares - fee;
+        equity += trade_profit;
+      }
 
-      double trade_profit = (exit_price - entry_price) * position_shares - fee;
       if (trade_profit > 0)
         winning_trades++;
       total_trades++;
 
       position_shares = 0;
       entry_price = 0;
+      position_type = 0;
     }
-    // Open position
-    else if (signal == 1 && position_shares == 0) {
-      double ask_price = tick.open * (1.0 + slippage_penalty);
-      double investment = size_is_percentage ? (equity * order_size)
-                                             : std::min(order_size, equity);
 
-      double fee =
-          commission_is_percentage ? (investment * commission) : commission;
-      investment -= fee;
+    // --- Signal Handling ---
+    if (!risk_triggered && signal != 0) {
+      if (signal == -1) {
+        // Close Long position (Flip Constraint: Flat first)
+        if (position_type == 1 && position_shares > 0) {
+          exit_price = tick.open * (1.0 - slippage_penalty);
+          double trade_value = position_shares * exit_price;
+          double fee = commission_is_percentage ? (trade_value * commission)
+                                                : commission;
 
-      entry_price = ask_price;
-      position_shares = investment / ask_price;
-      equity -= (investment + fee);
+          equity += (trade_value - fee);
+          double trade_profit =
+              (exit_price - entry_price) * position_shares - fee;
+          if (trade_profit > 0)
+            winning_trades++;
+          total_trades++;
+
+          position_shares = 0;
+          entry_price = 0;
+          position_type = 0;
+        }
+        // Open Short position (If flat)
+        else if (position_type == 0 && allow_shorts) {
+          double bid_price = tick.open * (1.0 - slippage_penalty);
+          double investment = size_is_percentage ? (equity * order_size)
+                                                 : std::min(order_size, equity);
+          double fee =
+              commission_is_percentage ? (investment * commission) : commission;
+          investment -= fee;
+
+          entry_price = bid_price;
+          position_shares = investment / bid_price;
+          position_type = -1;
+          equity -= fee;
+        }
+      } else if (signal == 1) {
+        // Close Short position (Flip Constraint: Flat first)
+        if (position_type == -1 && position_shares > 0) {
+          exit_price = tick.open * (1.0 + slippage_penalty);
+          double trade_value = position_shares * exit_price;
+          double fee = commission_is_percentage ? (trade_value * commission)
+                                                : commission;
+
+          double trade_profit =
+              (entry_price - exit_price) * position_shares - fee;
+          equity += trade_profit;
+
+          if (trade_profit > 0)
+            winning_trades++;
+          total_trades++;
+
+          position_shares = 0;
+          entry_price = 0;
+          position_type = 0;
+        }
+        // Open Long position (if flat)
+        else if (position_type == 0) {
+          double ask_price = tick.open * (1.0 + slippage_penalty);
+          double investment = size_is_percentage ? (equity * order_size)
+                                                 : std::min(order_size, equity);
+          double fee =
+              commission_is_percentage ? (investment * commission) : commission;
+          investment -= fee;
+
+          entry_price = ask_price;
+          position_shares = investment / ask_price;
+          position_type = 1;
+          equity -= (investment + fee);
+        }
+      }
     }
 
     // Daily/Periodic Returns Tracking for Sharpe
-    // Using a basic heuristic tracking per step for testing
-    double current_marked_equity = equity + (position_shares * tick.close);
+    double position_pnl = 0;
+    if (position_type == 1) {
+      position_pnl = position_shares * tick.close;
+    } else if (position_type == -1) {
+      position_pnl = (entry_price - tick.close) * position_shares;
+    }
+
+    double current_marked_equity = equity + position_pnl;
 
     peak_equity = std::max(peak_equity, current_marked_equity);
     double draw_down = (peak_equity - current_marked_equity) / peak_equity;
@@ -101,16 +197,30 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
   // Close remaining position at the end of simulation using the exact last
   // processed timestamp
   if (position_shares > 0 && last_valid_idx < data.size()) {
-    double exit_price = data[last_valid_idx].close * (1.0 - slippage_penalty);
-    double trade_value = position_shares * exit_price;
-    double fee =
-        commission_is_percentage ? (trade_value * commission) : commission;
-    equity += (trade_value - fee);
+    if (position_type == 1) {
+      double exit_price = data[last_valid_idx].close * (1.0 - slippage_penalty);
+      double trade_value = position_shares * exit_price;
+      double fee =
+          commission_is_percentage ? (trade_value * commission) : commission;
+      equity += (trade_value - fee);
 
-    double trade_profit = (exit_price - entry_price) * position_shares - fee;
-    if (trade_profit > 0)
-      winning_trades++;
-    total_trades++;
+      double trade_profit = (exit_price - entry_price) * position_shares - fee;
+      if (trade_profit > 0)
+        winning_trades++;
+      total_trades++;
+    } else if (position_type == -1) {
+      double exit_price = data[last_valid_idx].close * (1.0 + slippage_penalty);
+      double trade_value = position_shares * exit_price;
+      double fee =
+          commission_is_percentage ? (trade_value * commission) : commission;
+
+      double trade_profit = (entry_price - exit_price) * position_shares - fee;
+      equity += trade_profit;
+
+      if (trade_profit > 0)
+        winning_trades++;
+      total_trades++;
+    }
   }
 
   // Net Profit Calculations
