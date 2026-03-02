@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--capital", type=float, default=100000.0, help="Initial capital")
     parser.add_argument("--position-size", type=float, default=0.1, help="Position size (0.1 = 10 percent of portfolio)")
     parser.add_argument("--slippage", type=float, default=0.005, help="Slippage penalty")
-    parser.add_argument("--commission", type=float, default=2.5, help="Commission per trade (fixed dollar amount default)")
+    parser.add_argument("--commission", type=str, default="2.5", help="Commission per trade (e.g., '1.5' for $1.5 flat, or '1.5%%' for 1.5% percentage default)")
     return parser.parse_args()
 
 def date_to_nanos(date_str: str) -> int:
@@ -252,12 +252,22 @@ def main():
         start_ns = date_to_nanos(args.start_date)
         end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
         
+        # Parse dynamic commission
+        commission_str = str(args.commission).strip()
+        commission_is_percentage = False
+        commission_value = 0.0
+        if "%" in commission_str:
+            commission_is_percentage = True
+            commission_value = float(commission_str.replace("%", "")) / 100.0
+        else:
+            commission_value = float(commission_str)
+        
         stats = data_engine.run_backtest(
             initial_capital=args.capital,
             order_size=args.position_size,
             size_is_percentage=True,
-            commission=args.commission,
-            commission_is_percentage=False,
+            commission=commission_value,
+            commission_is_percentage=commission_is_percentage,
             slippage_penalty=args.slippage,
             start_timestamp=start_ns,
             end_timestamp=end_ns,
