@@ -23,7 +23,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZSTD REQUIRED libzstd)
 
 # Pybind11 module target
-pybind11_add_module(chimera_core src/bindings/pybind_wrapper.cpp src/core/dbn_parser.cpp)
+pybind11_add_module(chimera_core src/bindings/pybind_wrapper.cpp src/core/dbn_parser.cpp src/core/backtest.cpp)
 
 target_include_directories(chimera_core PRIVATE src/core ${ZSTD_INCLUDE_DIRS})
 target_link_libraries(chimera_core PRIVATE ${ZSTD_LIBRARIES})

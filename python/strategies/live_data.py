@@ -1,5 +1,6 @@
 import os
 import asyncio
+# pyre-ignore-all-errors[21]
 from alpaca.data.live import StockDataStream
 from alpaca.data.models.trades import Trade
 from alpaca.data.enums import DataFeed
@@ -13,7 +14,7 @@ SECRET_KEY = "OLqMI9JtYfHbruwyzFDSMs9cmAdug5kAwFZJjyrJ"
 MEGA_CAPS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK.B", "LLY", "V"]
 
 class MarketDataEngine:
-    def __init__(self, historical_file: str = None):
+    def __init__(self, historical_file: str | None = None):
         print("Initializing Market Data Engine...")
         self.buffer = chimera_core.MarketDataBuffer(1000000)
         
