@@ -80,12 +80,23 @@ def main():
     
     view = data_engine.get_buffer_view()
     if 'instrument_id' in view.dtype.names:
-        instrument_ids = np.unique(view['instrument_id'])
-        print(f"Found {len(instrument_ids)} unique instruments: {instrument_ids}")
+        start_ns = date_to_nanos(args.start_date)
+        end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
+
+        mask = (view['timestamp'] >= start_ns) & (view['timestamp'] <= end_ns)
+        window_view = view[mask]
+        
+        if len(window_view) == 0:
+            print(f"No data available in the requested timeframe: {args.start_date} to {args.end_date}")
+            import sys
+            sys.exit(0)
+            
+        instrument_ids, counts = np.unique(window_view['instrument_id'], return_counts=True)
+        print(f"Found {len(instrument_ids)} unique instruments in timeframe.")
         
         if len(instrument_ids) >= 1:
-            target_id = int(instrument_ids[0])
-            print(f"Filtering dataset to target instrument ID: {target_id}")
+            target_id = int(instrument_ids[np.argmax(counts)])
+            print(f"Auto-selected most active instrument ID: {target_id} with {np.max(counts)} ticks in timeframe.")
             data_engine = data_engine.filter_by_instrument(target_id)
             total_ticks = len(data_engine.get_buffer_view())
             print(f"Filtered down to {total_ticks} ticks for isolated metric analysis.")
