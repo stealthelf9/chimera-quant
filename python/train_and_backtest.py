@@ -3,6 +3,7 @@ import sys
 import zipfile
 import argparse
 from datetime import datetime
+import numpy as np
 
 # Ensure CMake build output is in PYTHONPATH for the chimera_core C++ module
 BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "build")
@@ -38,31 +39,39 @@ def main():
     print("=========================================")
     
     data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-    zip_files = [f for f in os.listdir(data_dir) if f.endswith(".zip")]
-    if not zip_files:
-        print("No Databento ZIPs found in data/.")
+    extracted_dir = os.path.join(data_dir, "extracted")
+    
+    dbn_files = []
+    if os.path.exists(extracted_dir):
+        dbn_files = [os.path.join(extracted_dir, f) for f in os.listdir(extracted_dir) if f.endswith(".dbn.zst")]
+        
+    if not dbn_files:
+        print("No extracted dbn.zst files found. Inspecting ZIPs...")
+        zip_files = [f for f in os.listdir(data_dir) if f.endswith(".zip")]
+        if not zip_files:
+            print("No Databento ZIPs or extracted data found in data/.")
+            return
+
+        zip_path = os.path.join(data_dir, zip_files[0])
+        print(f"Inspecting Archive: {zip_files[0]}")
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            for name in zf.namelist():
+                if name.endswith(".dbn.zst"):
+                    print(f"Extracting {name} to data/extracted/...")
+                    zf.extract(name, path=extracted_dir)
+                    dbn_files.append(os.path.join(extracted_dir, name))
+
+    if not dbn_files:
+        print("No .dbn.zst files available.")
         return
 
-    zip_path = os.path.join(data_dir, zip_files[0])
-    print(f"Inspecting Archive: {zip_files[0]}")
-    target_zst = None
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        for name in zf.namelist():
-            if name.endswith(".dbn.zst"):
-                target_zst = name
-                print(f"Extracting {target_zst} to data/extracted/...")
-                zf.extract(name, path=os.path.join(data_dir, "extracted"))
-                break
-
-    if not target_zst:
-        print("No .dbn.zst files found in archive.")
-        return
-
-    dbn_file = os.path.join(data_dir, "extracted", target_zst)
+    dbn_files.sort() # Ensure chronological order
 
     print("\n--- Loading Data to Zero-Copy Buffer ---")
-    data_engine = chimera_core.MarketDataBuffer(1000000)
-    data_engine.load_dbn(dbn_file)
+    data_engine = chimera_core.MarketDataBuffer(10000000)
+    for f in dbn_files:
+        data_engine.load_dbn(f)
+        
     total_ticks = len(data_engine.get_buffer_view())
     print(f"Loaded {total_ticks} ticks natively mapped to NumPy.")
 
@@ -84,55 +93,86 @@ def main():
         total_ticks = len(data_engine.get_buffer_view())
         print(f"Resampled native buffer to {args.timeframe}. New tick count: {total_ticks}")
 
-    print("\n--- Initializing PyTorch AI ---")
-    ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
-    
-    train_size = int(total_ticks * 0.8)
-    ai_strategy.buffer = data_engine.slice(0, train_size)
-    
-    if args.mode in ["train", "backtest"]:
-        ai_strategy.train(epochs=2, batch_size=128)
-
-    print("\n--- Generating Predictions for Validation Set ---")
-    validation_size = total_ticks - train_size
+    print("\n--- Initializing Strategies ---")
+    strategies_list = [s.strip().lower() for s in args.strategies.split(",")]
     signals = [0] * total_ticks
+    train_size = int(total_ticks * 0.8)
     
-    for i in range(train_size, total_ticks):
-        ai_strategy.buffer = data_engine.slice(i - ai_strategy.window_size, i + 1)
-        sig = ai_strategy.evaluate()
-        if sig:
-            signals[i] = sig
+    if "ai" in strategies_list:
+        ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
+        
+        if args.mode == "train":
+            ai_strategy.buffer = data_engine.slice(0, train_size)
+            ai_strategy.train(epochs=1, batch_size=16384)
+            # Save weights
+            weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
+            os.makedirs(weights_dir, exist_ok=True)
+            import torch
+            torch.save(ai_strategy.model.state_dict(), os.path.join(weights_dir, "chimeranet_latest.pt"))
+            np.save(os.path.join(weights_dir, "feature_mean.npy"), ai_strategy.feature_mean)
+            np.save(os.path.join(weights_dir, "feature_std.npy"), ai_strategy.feature_std)
+            print("Training finished and weights/scalers saved natively.")
+            return
 
-    print("\n--- Executing C++ Strategy Logic Simulator ---")
-    start_ns = date_to_nanos(args.start_date)
-    end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
-    
-    stats = data_engine.run_backtest(
-        initial_capital=args.capital,
-        order_size=args.position_size,
-        size_is_percentage=True,
-        commission=2.5,
-        commission_is_percentage=False,
-        slippage_penalty=args.slippage,
-        start_timestamp=start_ns,
-        end_timestamp=end_ns,
-        signals=signals
-    )
-    
-    print(f"\n[BACKTEST RESULTS]")
-    print(f"Net Profit: ${stats.net_profit_usd:.2f} ({stats.net_profit_pct:.2f}%)")
-    print(f"Win Rate: {stats.win_rate:.2f}%")
-    print(f"Max Drawdown: {stats.max_drawdown:.2f}%")
-    print(f"Sharpe Ratio: {stats.sharpe_ratio:.2f}")
+        elif args.mode == "backtest":
+            weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
+            weights_path = os.path.join(weights_dir, "chimeranet_latest.pt")
+            mean_path = os.path.join(weights_dir, "feature_mean.npy")
+            std_path = os.path.join(weights_dir, "feature_std.npy")
+            if os.path.exists(weights_path):
+                import torch
+                ai_strategy.model.load_state_dict(torch.load(weights_path, map_location=ai_strategy.device, weights_only=True))
+            if os.path.exists(mean_path) and os.path.exists(std_path):
+                ai_strategy.feature_mean = np.load(mean_path)
+                ai_strategy.feature_std = np.load(std_path)
+            ai_strategy.model.eval()
 
-    print("\nCaching Results & Model Weights to SQLite...")
-    cache = EvaluationCache()
-    cache.log_backtest("ChimeraNet_Alpha", {"window_size": 30}, 0, 0, stats.net_profit_usd, stats.max_drawdown)
-    cache.log_ai_weights("ChimeraNet_Alpha", 0.0, "weights/chimeranet_latest.pt", {"epochs": 2})
-    
-    os.makedirs(os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights"), exist_ok=True)
-    import torch
-    torch.save(ai_strategy.model.state_dict(), os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights", "chimeranet_latest.pt"))
+            print("\n--- Generating Predictions for Validation Set ---")
+            for i in range(train_size, total_ticks):
+                ai_strategy.buffer = data_engine.slice(i - ai_strategy.window_size, i + 1)
+                sig = ai_strategy.evaluate()
+                if sig:
+                    signals[i] = sig
+
+    else:
+        # Standard Indicator Logic (No PyTorch Initialization)
+        print("\n--- Generating Standard Indicator Predictions ---")
+        if "rsi" in strategies_list:
+            from python.strategies.indicators import Indicators
+            rsi_array = Indicators.rsi(data_engine, timeperiod=14)
+            for i in range(train_size, total_ticks):
+                if i < len(rsi_array) and not np.isnan(rsi_array[i]):
+                    if rsi_array[i] < 30:
+                        signals[i] = 1
+                    elif rsi_array[i] > 70:
+                        signals[i] = -1
+
+    if args.mode == "backtest":
+        print("\n--- Executing C++ Strategy Logic Simulator ---")
+        start_ns = date_to_nanos(args.start_date)
+        end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
+        
+        stats = data_engine.run_backtest(
+            initial_capital=args.capital,
+            order_size=args.position_size,
+            size_is_percentage=True,
+            commission=2.5,
+            commission_is_percentage=False,
+            slippage_penalty=args.slippage,
+            start_timestamp=start_ns,
+            end_timestamp=end_ns,
+            signals=signals
+        )
+        
+        print(f"\n[BACKTEST RESULTS]")
+        print(f"Net Profit: ${stats.net_profit_usd:.2f} ({stats.net_profit_pct:.2f}%)")
+        print(f"Win Rate: {stats.win_rate:.2f}%")
+        print(f"Max Drawdown: {stats.max_drawdown:.2f}%")
+        print(f"Sharpe Ratio: {stats.sharpe_ratio:.2f}")
+
+        print("\nCaching Results to SQLite...")
+        cache = EvaluationCache()
+        cache.log_backtest("ChimeraNet/RSI", {"window_size": 30}, 0, 0, stats.net_profit_usd, stats.max_drawdown)
 
 if __name__ == "__main__":
     main()

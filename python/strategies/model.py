@@ -54,24 +54,32 @@ class AIStrategy(BaseStrategy):
         )).astype(np.float32)
 
         # Standardize features (Z-Score Normalization)
-        self.feature_mean = np.mean(features, axis=0)
-        self.feature_std = np.std(features, axis=0)
+        self.feature_mean = np.mean(features, axis=0, dtype=np.float64)
+        self.feature_std = np.std(features, axis=0, dtype=np.float64)
         self.feature_std[self.feature_std == 0] = 1.0 # Prevent div by zero
-        features = (features - self.feature_mean) / self.feature_std
+        features = ((features - self.feature_mean) / self.feature_std).astype(np.float32)
+        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
-        X, y = [], []
-        for i in range(len(features) - self.window_size):
-            X.append(features[i:i+self.window_size])
-            # Target prediction is the percentage return of the next tick close vs current
-            curr_close = view['close'][i + self.window_size - 1]
-            next_close = view['close'][i + self.window_size]
-            pct_return = (next_close - curr_close) / curr_close if curr_close != 0 else 0
-            y.append([pct_return])
-            
-        X = torch.tensor(np.array(X)).to(self.device)
-        y = torch.tensor(np.array(y)).to(self.device)
+        # 1. Vectorized sliding window for X
+        X = np.lib.stride_tricks.sliding_window_view(features[:-1], (self.window_size, 5)).squeeze(axis=1)
+
+        # 2. Vectorized target for y (Percentage Return)
+        closes = view['close'].astype(np.float32)
+        curr_closes = closes[self.window_size - 1 : -1]
+        next_closes = closes[self.window_size :]
         
-        dataset = torch.utils.data.TensorDataset(X, y)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            pct_returns = np.where(curr_closes < 1e-8, 0.0, (next_closes - curr_closes) / curr_closes)
+            
+        y = np.clip(pct_returns, -10.0, 10.0).reshape(-1, 1).astype(np.float32)
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            X_tensor = torch.from_numpy(X)
+            y_tensor = torch.from_numpy(y)
+
+        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
         criterion = nn.MSELoss()
@@ -79,16 +87,25 @@ class AIStrategy(BaseStrategy):
         
         self.model.train()
         print(f"[{self.name}] Starting Training (Device: {self.device})")
+        
+        total_batches = len(dataloader)
+        print_interval = max(1, total_batches // 10)
+        
         for epoch in range(epochs):
             total_loss = 0
-            for batch_X, batch_y in dataloader:
+            for i, (batch_X, batch_y) in enumerate(dataloader):
+                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
                 optimizer.zero_grad()
                 outputs = self.model(batch_X)
                 loss = criterion(outputs, batch_y)
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
-            print(f"[{self.name}] Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(dataloader):.4f}")
+                
+                if (i + 1) % print_interval == 0 or (i + 1) == total_batches:
+                    print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Batch {i+1}/{total_batches} - Loss: {total_loss/(i+1):.4f}")
+            
+            print(f"[{self.name}] Epoch {epoch+1}/{epochs}, Average Loss: {total_loss/total_batches:.4f}")
 
         self.model.eval()
         print(f"[{self.name}] Training Complete.")
@@ -115,8 +132,10 @@ class AIStrategy(BaseStrategy):
         if hasattr(self, 'feature_mean') and hasattr(self, 'feature_std'):
             features = (features - self.feature_mean) / self.feature_std
 
+        features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
         # Reshape for LSTM: (batch_size, sequence_length, input_size)
-        x_tensor = torch.tensor(features).unsqueeze(0).to(self.device)
+        x_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
             prediction = self.model(x_tensor)
