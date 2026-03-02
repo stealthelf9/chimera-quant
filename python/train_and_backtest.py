@@ -260,7 +260,7 @@ def main():
             slippage_penalty=args.slippage,
             start_timestamp=start_ns,
             end_timestamp=end_ns,
-            signals=signals.tolist()
+            signals=signals
         )
         
         print(f"\n[BACKTEST RESULTS]")
