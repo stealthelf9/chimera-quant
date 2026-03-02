@@ -154,11 +154,61 @@ def main():
             ai_strategy.model.eval()
 
             print("\n--- Generating Predictions for Validation Set ---")
-            for i in range(train_size, total_ticks):
-                ai_strategy.buffer = data_engine.slice(i - ai_strategy.window_size, i + 1)
-                sig = ai_strategy.evaluate()
-                if sig != 0:
-                    signals[i] = sig
+            
+            view = data_engine.get_buffer_view()
+            start_ns = date_to_nanos(args.start_date)
+            end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
+            
+            mask = (view['timestamp'] >= start_ns) & (view['timestamp'] <= end_ns)
+            valid_indices = np.where(mask)[0]
+            
+            if len(valid_indices) == 0:
+                print("No data in requested timeframe.")
+                import sys
+                sys.exit(0)
+                
+            start_eval_idx = max(ai_strategy.window_size, valid_indices[0])
+            end_eval_idx = valid_indices[-1] + 1
+            
+            # Extract features fully padded
+            features = np.column_stack((
+                view['open'],
+                view['high'],
+                view['low'],
+                view['close'],
+                view['volume']
+            )).astype(np.float32)
+
+            if hasattr(ai_strategy, 'feature_mean') and hasattr(ai_strategy, 'feature_std'):
+                features = (features - ai_strategy.feature_mean) / ai_strategy.feature_std
+                
+            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+            # Generate Sliding Windows natively directly in NumPy
+            X_all = np.lib.stride_tricks.sliding_window_view(
+                features, (ai_strategy.window_size, 5)
+            ).squeeze(axis=1)
+            
+            # Map index subset targets for PyTorch
+            valid_X = X_all[start_eval_idx - ai_strategy.window_size : end_eval_idx - ai_strategy.window_size]
+            
+            with torch.no_grad():
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    X_tensor = torch.tensor(valid_X, dtype=torch.float32).to(ai_strategy.device)
+                
+                # Execute full batched dataset forwards
+                predictions = ai_strategy.model(X_tensor).cpu().numpy().flatten()
+            
+            # Assign executed logic natively to signal arrays
+            buy_mask = predictions > 0.00
+            sell_mask = predictions < -0.01
+            
+            signals[start_eval_idx:end_eval_idx][buy_mask] = 1
+            signals[start_eval_idx:end_eval_idx][sell_mask] = -1
+            
+            print(f"Generated {np.sum(buy_mask)} BUYS and {np.sum(sell_mask)} SELLS")
 
     else:
         # Standard Indicator Logic (No PyTorch Initialization)
