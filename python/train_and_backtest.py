@@ -192,14 +192,31 @@ def main():
             # Map index subset targets for PyTorch
             valid_X = X_all[start_eval_idx - ai_strategy.window_size : end_eval_idx - ai_strategy.window_size]
             
+            if len(valid_X) == 0:
+                print("Not enough contiguous data for AI evaluation window.")
+                import sys
+                sys.exit(0)
+            
+            # Use chunks so we don't overflow AMD ROCm LSTM max-sequence sizes in one pass
+            chunk_size = 16384
+            all_preds = []
+            
             with torch.no_grad():
                 import warnings
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    X_tensor = torch.tensor(valid_X, dtype=torch.float32).to(ai_strategy.device)
+                    X_tensor = torch.tensor(valid_X.copy(), dtype=torch.float32).to(ai_strategy.device)
                 
-                # Execute full batched dataset forwards
-                predictions = ai_strategy.model(X_tensor).cpu().numpy().flatten()
+                # Execute batched dataset forwards in chunks
+                for i in range(0, len(X_tensor), chunk_size):
+                    chunk = X_tensor[i : i + chunk_size]
+                    preds = ai_strategy.model(chunk).cpu().numpy().flatten()
+                    all_preds.append(preds)
+            
+            if all_preds:
+                predictions = np.concatenate(all_preds)
+            else:
+                predictions = np.array([])
             
             # Assign executed logic natively to signal arrays
             buy_mask = predictions > 0.00
