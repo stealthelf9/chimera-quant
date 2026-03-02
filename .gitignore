@@ -1,3 +1,4 @@
-.venv
-/data
-/build
+.venv/
+data/
+build/
+__pycache__
