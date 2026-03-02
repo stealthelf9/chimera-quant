@@ -12,6 +12,7 @@ struct BacktestStats {
   double win_rate;
   double max_drawdown;
   double sharpe_ratio;
+  int total_trades;
 
   // Trade logs could be expanded natively here, but for now we'll
   // just return the summarized stats for execution efficiency.

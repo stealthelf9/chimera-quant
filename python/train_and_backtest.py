@@ -268,6 +268,7 @@ def main():
         print(f"Win Rate: {stats.win_rate:.2f}%")
         print(f"Max Drawdown: {stats.max_drawdown:.2f}%")
         print(f"Sharpe Ratio: {stats.sharpe_ratio:.2f}")
+        print(f"Total Trades: {stats.total_trades}")
 
         print("\nCaching Results to SQLite...")
         cache = EvaluationCache()

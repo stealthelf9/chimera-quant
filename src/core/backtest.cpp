@@ -16,7 +16,7 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
                                      uint64_t end_timestamp,
                                      const std::vector<int> &signals) {
 
-  BacktestStats stats = {0};
+  BacktestStats stats{};
   if (data.empty() || signals.size() != data.size()) {
     std::cerr << "Backtest aborted: Buffer empty or signal mismatch."
               << std::endl;
@@ -120,6 +120,7 @@ BacktestStats BacktestSimulator::run(double initial_capital, double order_size,
                        ? ((double)winning_trades / total_trades) * 100.0
                        : 0.0;
   stats.max_drawdown = max_dd * 100.0;
+  stats.total_trades = total_trades;
 
   // Standard Deviation of Returns Native Compute
   if (!daily_returns.empty()) {

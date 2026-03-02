@@ -141,7 +141,8 @@ PYBIND11_MODULE(chimera_core, m) {
       .def_readonly("net_profit_pct", &BacktestStats::net_profit_pct)
       .def_readonly("win_rate", &BacktestStats::win_rate)
       .def_readonly("max_drawdown", &BacktestStats::max_drawdown)
-      .def_readonly("sharpe_ratio", &BacktestStats::sharpe_ratio);
+      .def_readonly("sharpe_ratio", &BacktestStats::sharpe_ratio)
+      .def_readonly("total_trades", &BacktestStats::total_trades);
 
   py::class_<MarketDataBuffer, std::shared_ptr<MarketDataBuffer>>(
       m, "MarketDataBuffer")
