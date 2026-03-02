@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--capital", type=float, default=100000.0, help="Initial capital")
     parser.add_argument("--position-size", type=float, default=0.1, help="Position size (0.1 = 10 percent of portfolio)")
     parser.add_argument("--slippage", type=float, default=0.005, help="Slippage penalty")
+    parser.add_argument("--commission", type=float, default=2.5, help="Commission per trade (fixed dollar amount default)")
     return parser.parse_args()
 
 def date_to_nanos(date_str: str) -> int:
@@ -255,7 +256,7 @@ def main():
             initial_capital=args.capital,
             order_size=args.position_size,
             size_is_percentage=True,
-            commission=2.5,
+            commission=args.commission,
             commission_is_percentage=False,
             slippage_penalty=args.slippage,
             start_timestamp=start_ns,
