@@ -269,8 +269,8 @@ def main():
                 predictions = np.array([])
             
             # Assign executed logic natively to signal arrays
-            buy_mask = predictions > 0.005
-            sell_mask = predictions < -0.005
+            buy_mask = predictions > 0.05
+            sell_mask = predictions < -0.05
             
             signals[start_eval_idx:end_eval_idx][buy_mask] = 1
             signals[start_eval_idx:end_eval_idx][sell_mask] = -1

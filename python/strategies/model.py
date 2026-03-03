@@ -78,7 +78,7 @@ class AIStrategy(BaseStrategy):
         next_closes = closes[self.window_size :]
         
         with np.errstate(divide='ignore', invalid='ignore'):
-            pct_returns = np.where(curr_closes < 1e-8, 0.0, (next_closes - curr_closes) / curr_closes)
+            pct_returns = np.where(curr_closes < 1e-8, 0.0, ((next_closes - curr_closes) / curr_closes) * 100.0)
             
         y = np.clip(pct_returns, -10.0, 10.0).reshape(-1, 1).astype(np.float32)
 
@@ -158,8 +158,8 @@ class AIStrategy(BaseStrategy):
         pred_return = prediction.item()
         
         # Basic logic: Returns predicted natively
-        if pred_return > 0.001: # Expected > 0.1% gain
+        if pred_return > 0.05: # Expected > 0.05% gain
             return 1 # BUY
-        elif pred_return < -0.001: # Expected < -0.1% loss
+        elif pred_return < -0.05: # Expected < -0.05% loss
             return -1 # SELL
         return 0 # HOLD
