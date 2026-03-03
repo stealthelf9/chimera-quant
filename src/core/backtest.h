@@ -1,9 +1,16 @@
 #pragma once
 #include "types.h"
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace chimera {
+
+struct PositionState {
+  int type = 0; // 1 = Long, -1 = Short, 0 = Flat
+  double shares = 0.0;
+  double entry_price = 0.0;
+};
 
 // Structure holding performance results to return directly to Python
 struct BacktestStats {

@@ -154,6 +154,35 @@ def main():
         file_prefix = "UNIVERSAL" if args.symbols == "ALL" else args.symbols.replace(',', '_')
         
         if args.mode == "train":
+            # --- Global Scaler Calculation Phase ---
+            print("\n--- Calculating Global Feature Scalers ---")
+            all_features = []
+            for t_id in target_ids_to_process:
+                sub_engine = data_engine.filter_by_instrument(t_id)
+                train_size = int(len(sub_engine.get_buffer_view()) * 0.8)
+                if train_size < 100:
+                    continue
+                    
+                view = sub_engine.slice(0, train_size).get_buffer_view()
+                closes = view['close']
+                returns = np.zeros_like(closes, dtype=np.float32)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, ((closes[1:] - closes[:-1]) / closes[:-1]) * 100.0)
+                    
+                from python.strategies.indicators import Indicators
+                rsi = Indicators.rsi(sub_engine.slice(0, train_size), timeperiod=14)
+                _, _, macdhist = Indicators.macd(sub_engine.slice(0, train_size))
+                
+                features = np.column_stack((returns, view['volume'], rsi, macdhist)).astype(np.float32)
+                all_features.append(features)
+                
+            if all_features:
+                global_features = np.concatenate(all_features, axis=0)
+                ai_strategy.feature_mean = np.nanmean(global_features, axis=0, dtype=np.float64)
+                ai_strategy.feature_std = np.nanstd(global_features, axis=0, dtype=np.float64)
+                ai_strategy.feature_std[ai_strategy.feature_std == 0] = 1.0
+                print("Global Scalers Computed.")
+                
             for t_id in target_ids_to_process:
                 sub_engine = data_engine.filter_by_instrument(t_id)
                 train_size = int(len(sub_engine.get_buffer_view()) * 0.8)

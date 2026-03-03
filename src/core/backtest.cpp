@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <unordered_map> // Ensure unordered_map is included for PositionState
 
 namespace chimera {
 
@@ -30,9 +31,8 @@ BacktestSimulator::run(double initial_capital, double order_size,
   int total_trades = 0;
   int winning_trades = 0;
 
-  int position_type = 0; // 1 = Long, -1 = Short, 0 = Flat
-  double position_shares = 0;
-  double entry_price = 0;
+  std::unordered_map<uint32_t, PositionState> positions;
+  std::unordered_map<uint32_t, double> latest_prices;
 
   std::vector<double> daily_returns;
   double last_equity = equity;
@@ -51,16 +51,18 @@ BacktestSimulator::run(double initial_capital, double order_size,
       break;
 
     last_valid_idx = i;
+    latest_prices[tick.instrument_id] = tick.close;
 
     int signal = (i > 0) ? signals[i - 1] : 0;
+    auto &pos = positions[tick.instrument_id];
 
     // --- Risk Management (SL / TP) ---
     bool risk_triggered = false;
     double exit_price = 0.0;
 
-    if (position_type == 1 && position_shares > 0) {
-      double sl_price = entry_price * (1.0 - stop_loss_pct);
-      double tp_price = entry_price * (1.0 + take_profit_pct);
+    if (pos.type == 1 && pos.shares > 0) {
+      double sl_price = pos.entry_price * (1.0 - stop_loss_pct);
+      double tp_price = pos.entry_price * (1.0 + take_profit_pct);
       if (tick.low <= sl_price) {
         exit_price = sl_price * (1.0 - slippage_penalty);
         risk_triggered = true;
@@ -68,9 +70,9 @@ BacktestSimulator::run(double initial_capital, double order_size,
         exit_price = tp_price * (1.0 - slippage_penalty);
         risk_triggered = true;
       }
-    } else if (position_type == -1 && position_shares > 0) {
-      double sl_price = entry_price * (1.0 + stop_loss_pct);
-      double tp_price = entry_price * (1.0 - take_profit_pct);
+    } else if (pos.type == -1 && pos.shares > 0) {
+      double sl_price = pos.entry_price * (1.0 + stop_loss_pct);
+      double tp_price = pos.entry_price * (1.0 - take_profit_pct);
       if (tick.high >= sl_price) {
         exit_price = sl_price * (1.0 + slippage_penalty);
         risk_triggered = true;
@@ -81,16 +83,16 @@ BacktestSimulator::run(double initial_capital, double order_size,
     }
 
     if (risk_triggered) {
-      double trade_value = position_shares * exit_price;
+      double trade_value = pos.shares * exit_price;
       double fee =
           commission_is_percentage ? (trade_value * commission) : commission;
 
       double trade_profit = 0;
-      if (position_type == 1) {
+      if (pos.type == 1) {
         equity += (trade_value - fee);
-        trade_profit = (exit_price - entry_price) * position_shares - fee;
-      } else if (position_type == -1) {
-        trade_profit = (entry_price - exit_price) * position_shares - fee;
+        trade_profit = (exit_price - pos.entry_price) * pos.shares - fee;
+      } else if (pos.type == -1) {
+        trade_profit = (pos.entry_price - exit_price) * pos.shares - fee;
         equity += trade_profit;
       }
 
@@ -98,92 +100,129 @@ BacktestSimulator::run(double initial_capital, double order_size,
         winning_trades++;
       total_trades++;
 
-      position_shares = 0;
-      entry_price = 0;
-      position_type = 0;
+      pos.shares = 0;
+      pos.entry_price = 0;
+      pos.type = 0;
     }
 
     // --- Signal Handling ---
     if (!risk_triggered && signal != 0) {
       if (signal == -1) {
         // Close Long position (Flip Constraint: Flat first)
-        if (position_type == 1 && position_shares > 0) {
+        if (pos.type == 1 && pos.shares > 0) {
           exit_price = tick.open * (1.0 - slippage_penalty);
-          double trade_value = position_shares * exit_price;
+          double trade_value = pos.shares * exit_price;
           double fee = commission_is_percentage ? (trade_value * commission)
                                                 : commission;
 
           equity += (trade_value - fee);
           double trade_profit =
-              (exit_price - entry_price) * position_shares - fee;
+              (exit_price - pos.entry_price) * pos.shares - fee;
           if (trade_profit > 0)
             winning_trades++;
           total_trades++;
 
-          position_shares = 0;
-          entry_price = 0;
-          position_type = 0;
+          pos.shares = 0;
+          pos.entry_price = 0;
+          pos.type = 0;
         }
         // Open Short position (If flat)
-        else if (position_type == 0 && allow_shorts) {
+        else if (pos.type == 0 && allow_shorts) {
           double bid_price = tick.open * (1.0 - slippage_penalty);
-          double investment = size_is_percentage ? (equity * order_size)
-                                                 : std::min(order_size, equity);
-          double fee =
-              commission_is_percentage ? (investment * commission) : commission;
-          investment -= fee;
-
-          entry_price = bid_price;
-          position_shares = investment / bid_price;
-          position_type = -1;
-          equity -= fee;
+          double current_marked_equity = equity;
+          for (const auto &pair : positions) {
+            const auto &p = pair.second;
+            if (p.shares > 0) {
+              double lp = latest_prices[pair.first];
+              if (p.type == 1)
+                current_marked_equity += p.shares * lp;
+              else if (p.type == -1)
+                current_marked_equity += (p.entry_price - lp) * p.shares;
+            }
+          }
+          double investment = size_is_percentage
+                                  ? (current_marked_equity * order_size)
+                                  : order_size;
+          investment = std::min(investment,
+                                equity); // can't invest more cash than we have
+          if (investment > 0) {
+            double fee = commission_is_percentage ? (investment * commission)
+                                                  : commission;
+            investment -= fee;
+            if (investment > 0) {
+              pos.entry_price = bid_price;
+              pos.shares = investment / bid_price;
+              pos.type = -1;
+              equity -= fee;
+            }
+          }
         }
       } else if (signal == 1) {
         // Close Short position (Flip Constraint: Flat first)
-        if (position_type == -1 && position_shares > 0) {
+        if (pos.type == -1 && pos.shares > 0) {
           exit_price = tick.open * (1.0 + slippage_penalty);
-          double trade_value = position_shares * exit_price;
+          double trade_value = pos.shares * exit_price;
           double fee = commission_is_percentage ? (trade_value * commission)
                                                 : commission;
 
           double trade_profit =
-              (entry_price - exit_price) * position_shares - fee;
+              (pos.entry_price - exit_price) * pos.shares - fee;
           equity += trade_profit;
 
           if (trade_profit > 0)
             winning_trades++;
           total_trades++;
 
-          position_shares = 0;
-          entry_price = 0;
-          position_type = 0;
+          pos.shares = 0;
+          pos.entry_price = 0;
+          pos.type = 0;
         }
         // Open Long position (if flat)
-        else if (position_type == 0) {
+        else if (pos.type == 0) {
           double ask_price = tick.open * (1.0 + slippage_penalty);
-          double investment = size_is_percentage ? (equity * order_size)
-                                                 : std::min(order_size, equity);
-          double fee =
-              commission_is_percentage ? (investment * commission) : commission;
-          investment -= fee;
-
-          entry_price = ask_price;
-          position_shares = investment / ask_price;
-          position_type = 1;
-          equity -= (investment + fee);
+          double current_marked_equity = equity;
+          for (const auto &pair : positions) {
+            const auto &p = pair.second;
+            if (p.shares > 0) {
+              double lp = latest_prices[pair.first];
+              if (p.type == 1)
+                current_marked_equity += p.shares * lp;
+              else if (p.type == -1)
+                current_marked_equity += (p.entry_price - lp) * p.shares;
+            }
+          }
+          double investment = size_is_percentage
+                                  ? (current_marked_equity * order_size)
+                                  : order_size;
+          investment = std::min(investment, equity);
+          if (investment > 0) {
+            double fee = commission_is_percentage ? (investment * commission)
+                                                  : commission;
+            investment -= fee;
+            if (investment > 0) {
+              pos.entry_price = ask_price;
+              pos.shares = investment / ask_price;
+              pos.type = 1;
+              equity -= (investment + fee);
+            }
+          }
         }
       }
     }
 
     // Daily/Periodic Returns Tracking for Sharpe
-    double position_pnl = 0;
-    if (position_type == 1) {
-      position_pnl = position_shares * tick.close;
-    } else if (position_type == -1) {
-      position_pnl = (entry_price - tick.close) * position_shares;
+    double current_marked_equity = equity;
+    for (const auto &pair : positions) {
+      const auto &p = pair.second;
+      if (p.shares > 0) {
+        double lp = latest_prices[pair.first];
+        if (p.type == 1) {
+          current_marked_equity += p.shares * lp;
+        } else if (p.type == -1) {
+          current_marked_equity += (p.entry_price - lp) * p.shares;
+        }
+      }
     }
-
-    double current_marked_equity = equity + position_pnl;
 
     peak_equity = std::max(peak_equity, current_marked_equity);
     double draw_down = (peak_equity - current_marked_equity) / peak_equity;
@@ -194,32 +233,39 @@ BacktestSimulator::run(double initial_capital, double order_size,
     last_equity = current_marked_equity;
   }
 
-  // Close remaining position at the end of simulation using the exact last
-  // processed timestamp
-  if (position_shares > 0 && last_valid_idx < data.size()) {
-    if (position_type == 1) {
-      double exit_price = data[last_valid_idx].close * (1.0 - slippage_penalty);
-      double trade_value = position_shares * exit_price;
-      double fee =
-          commission_is_percentage ? (trade_value * commission) : commission;
-      equity += (trade_value - fee);
+  // Close remaining positions at the end of simulation
+  for (auto &pair : positions) {
+    auto &pos = pair.second;
+    if (pos.shares > 0) {
+      // Find the last actual tick for this specific instrument id
+      // Since data is chronological, latest_prices is the final valid tick we
+      // have for it
+      double exit_price = latest_prices[pair.first];
+      if (pos.type == 1) {
+        exit_price *= (1.0 - slippage_penalty);
+        double trade_value = pos.shares * exit_price;
+        double fee =
+            commission_is_percentage ? (trade_value * commission) : commission;
+        equity += (trade_value - fee);
 
-      double trade_profit = (exit_price - entry_price) * position_shares - fee;
-      if (trade_profit > 0)
-        winning_trades++;
-      total_trades++;
-    } else if (position_type == -1) {
-      double exit_price = data[last_valid_idx].close * (1.0 + slippage_penalty);
-      double trade_value = position_shares * exit_price;
-      double fee =
-          commission_is_percentage ? (trade_value * commission) : commission;
+        double trade_profit = (exit_price - pos.entry_price) * pos.shares - fee;
+        if (trade_profit > 0)
+          winning_trades++;
+        total_trades++;
+      } else if (pos.type == -1) {
+        exit_price *= (1.0 + slippage_penalty);
+        double trade_value = pos.shares * exit_price;
+        double fee =
+            commission_is_percentage ? (trade_value * commission) : commission;
 
-      double trade_profit = (entry_price - exit_price) * position_shares - fee;
-      equity += trade_profit;
+        double trade_profit = (pos.entry_price - exit_price) * pos.shares - fee;
+        equity += trade_profit;
 
-      if (trade_profit > 0)
-        winning_trades++;
-      total_trades++;
+        if (trade_profit > 0)
+          winning_trades++;
+        total_trades++;
+      }
+      pos.shares = 0;
     }
   }
 
@@ -245,7 +291,6 @@ BacktestSimulator::run(double initial_capital, double order_size,
     double std_dev = std::sqrt(varianceSum / daily_returns.size());
 
     // Annualized Sharpe using generic 252 (Days) * 390 (Minutes) roughly
-    // proxying
     if (std_dev > 0) {
       stats.sharpe_ratio = (mean / std_dev) * std::sqrt(252 * 390);
     } else {

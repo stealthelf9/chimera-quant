@@ -63,9 +63,10 @@ class AIStrategy(BaseStrategy):
         )).astype(np.float32)
 
         # Standardize features (Z-Score Normalization)
-        self.feature_mean = np.nanmean(features, axis=0, dtype=np.float64)
-        self.feature_std = np.nanstd(features, axis=0, dtype=np.float64)
-        self.feature_std[self.feature_std == 0] = 1.0 # Prevent div by zero
+        if not hasattr(self, 'feature_mean') or self.feature_mean is None or not hasattr(self, 'feature_std') or self.feature_std is None:
+            self.feature_mean = np.nanmean(features, axis=0, dtype=np.float64)
+            self.feature_std = np.nanstd(features, axis=0, dtype=np.float64)
+            self.feature_std[self.feature_std == 0] = 1.0 # Prevent div by zero
         features = ((features - self.feature_mean) / self.feature_std).astype(np.float32)
         features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
