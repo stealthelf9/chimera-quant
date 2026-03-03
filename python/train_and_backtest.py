@@ -17,6 +17,9 @@ from python.storage.cache import EvaluationCache
 def parse_args():
     parser = argparse.ArgumentParser(description="Chimera Quant Backtest & Training CLI")
     parser.add_argument("--mode", choices=["train", "backtest", "live"], default="backtest", help="Execution mode")
+    parser.add_argument("--dataset", type=str, default="", help="Subfolder inside the data directory (e.g., 'equs' or 'itch'). Leave blank for root data folder.")
+    parser.add_argument("--model-name", type=str, default="UNIVERSAL", help="Custom name for saving/loading model weights and scalers.")
+    parser.add_argument("--resume", action="store_true", help="Load existing weights before training to resume a session.")
     parser.add_argument("--strategies", type=str, default="ai", help="Comma separated list of strategies")
     parser.add_argument("--timeframe", type=str, default="1m", help="Resampling timeframe (e.g., 1m, 5m, 1h, 1d)")
     parser.add_argument("--start-date", type=str, default="", help="Start date YYYY-MM-DD")
@@ -25,9 +28,9 @@ def parse_args():
     parser.add_argument("--capital", type=float, default=100000.0, help="Initial capital")
     parser.add_argument("--position-size", type=float, default=0.1, help="Position size (0.1 = 10 percent of portfolio)")
     parser.add_argument("--slippage", type=float, default=0.005, help="Slippage penalty")
-    parser.add_argument("--commission", type=str, default="2.5", help="Commission per trade (e.g., '1.5' for $1.5 flat, or '1.5%%' for 1.5% percentage default)")
-    parser.add_argument("--stop-loss", type=float, default=0.05, help="Stop loss percentage (e.g., 0.05 for 5%)")
-    parser.add_argument("--take-profit", type=float, default=0.10, help="Take profit percentage (e.g., 0.10 for 10%)")
+    parser.add_argument("--commission", type=str, default="2.5", help="Commission per trade (e.g., '1.5' for $1.5 flat, or '1.5%%' for 1.5%% percentage default)")
+    parser.add_argument("--stop-loss", type=float, default=0.05, help="Stop loss percentage (e.g., 0.05 for 5%%)")
+    parser.add_argument("--take-profit", type=float, default=0.10, help="Take profit percentage (e.g., 0.10 for 10%%)")
     parser.add_argument("--shorting", action="store_true", help="Enable short selling")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=256, help="Training batch size")
@@ -45,7 +48,10 @@ def main():
     print(f" Chimera Quant: Mode -> {args.mode.upper()} ")
     print("=========================================")
     
-    data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    if args.dataset:
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", args.dataset)
+    else:
+        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
     
     dbn_files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith(".dbn.zst")]
         
@@ -151,9 +157,38 @@ def main():
         train_size = int(total_ticks * 0.8)
         ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
         
-        file_prefix = "UNIVERSAL" if args.symbols == "ALL" else args.symbols.replace(',', '_')
+        file_prefix = args.model_name
         
         if args.mode == "train":
+            if args.resume:
+                print(f"\n--- Resuming from previous weights: {file_prefix} ---")
+                weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
+                weights_path = os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt")
+                mean_path = os.path.join(weights_dir, f"feature_mean_{file_prefix}.npy")
+                std_path = os.path.join(weights_dir, f"feature_std_{file_prefix}.npy")
+                if os.path.exists(weights_path):
+                    import torch
+                    state_dict = torch.load(weights_path, map_location=ai_strategy.device, weights_only=True)
+                    clean_dict = {}
+                    for key, value in state_dict.items():
+                        clean_key = key.replace("_orig_mod.", "")
+                        clean_dict[clean_key] = value
+                    
+                    if hasattr(ai_strategy.model, '_orig_mod'):
+                        ai_strategy.model._orig_mod.load_state_dict(clean_dict)
+                    else:
+                        ai_strategy.model.load_state_dict(clean_dict)
+                    print(f"Loaded existing weights from {weights_path}")
+                else:
+                    print("Could not find weights file. Starting fresh.")
+                    
+                if os.path.exists(mean_path) and os.path.exists(std_path):
+                    ai_strategy.feature_mean = np.load(mean_path)
+                    ai_strategy.feature_std = np.load(std_path)
+                    print(f"Loaded existing scalers from {mean_path} and {std_path}")
+                else:
+                    print("Could not find scalers. Starting fresh.")
+                    
             # --- Global Scaler Calculation Phase ---
             print("\n--- Calculating Global Feature Scalers ---")
             all_features = []
@@ -319,9 +354,8 @@ def main():
                     predictions = np.array([])
                 
                 # Assign executed logic natively to localized sub arrays
-                # AI must predict at least a 0.75% jump to overcome broker fees!
-                buy_mask = predictions > 0.75
-                sell_mask = predictions < -0.75
+                buy_mask = predictions > 0.05
+                sell_mask = predictions < -0.30
                 
                 # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
                 global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
