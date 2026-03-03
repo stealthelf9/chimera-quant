@@ -183,13 +183,14 @@ def main():
                 ai_strategy.feature_std[ai_strategy.feature_std == 0] = 1.0
                 print("Global Scalers Computed.")
                 
-            for t_id in target_ids_to_process:
+            total_assets = len(target_ids_to_process)
+            for idx, t_id in enumerate(target_ids_to_process, start=1):
                 sub_engine = data_engine.filter_by_instrument(t_id)
                 train_size = int(len(sub_engine.get_buffer_view()) * 0.8)
                 if train_size < 100:
                     continue
                 ai_strategy.buffer = sub_engine.slice(0, train_size)
-                print(f"\n--- Training on Instrument ID: {t_id} ---")
+                print(f"\n--- Training on Instrument ID: {t_id} [{idx}/{total_assets} Assets] ---")
                 ai_strategy.train(epochs=args.epochs, batch_size=args.batch_size)
                 
             # Save weights

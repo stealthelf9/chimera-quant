@@ -99,7 +99,6 @@ class AIStrategy(BaseStrategy):
         print(f"[{self.name}] Starting Training (Device: {self.device})")
         
         total_batches = len(dataloader)
-        print_interval = max(1, total_batches // 10)
         
         for epoch in range(epochs):
             total_loss = 0
@@ -112,10 +111,7 @@ class AIStrategy(BaseStrategy):
                 optimizer.step()
                 total_loss += loss.item()
                 
-                if (i + 1) % print_interval == 0 or (i + 1) == total_batches:
-                    print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Batch {i+1}/{total_batches} - Loss: {total_loss/(i+1):.4f}")
-            
-            print(f"[{self.name}] Epoch {epoch+1}/{epochs}, Average Loss: {total_loss/total_batches:.4f}")
+            print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Average Loss: {total_loss/total_batches:.4f}")
 
         self.model.eval()
         print(f"[{self.name}] Training Complete.")
