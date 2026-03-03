@@ -175,6 +175,11 @@ def main():
             return
 
         elif args.mode == "backtest":
+            print("\n=========================================")
+            print("WARNING: Feature space has drastically changed to 4 Stationary Metrics (Returns, Volume, RSI, MACDHist).")
+            print("Ensure you run --mode train again before running backtests or PyTorch LSTM Tensor dimensions will mismatch!")
+            print("=========================================\n")
+            
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             weights_path = os.path.join(weights_dir, "chimeranet_latest.pt")
             mean_path = os.path.join(weights_dir, "feature_mean.npy")
@@ -204,13 +209,22 @@ def main():
             start_eval_idx = max(ai_strategy.window_size, valid_indices[0])
             end_eval_idx = valid_indices[-1] + 1
             
+            # Calculate stationary features
+            closes = view['close']
+            returns = np.zeros_like(closes, dtype=np.float32)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, np.diff(closes) / closes[:-1])
+                
+            from python.strategies.indicators import Indicators
+            rsi = Indicators.rsi(data_engine, timeperiod=14)
+            _, _, macdhist = Indicators.macd(data_engine)
+
             # Extract features fully padded
             features = np.column_stack((
-                view['open'],
-                view['high'],
-                view['low'],
-                view['close'],
-                view['volume']
+                returns,
+                view['volume'],
+                rsi,
+                macdhist
             )).astype(np.float32)
 
             if hasattr(ai_strategy, 'feature_mean') and hasattr(ai_strategy, 'feature_std'):
@@ -220,7 +234,7 @@ def main():
 
             # Generate Sliding Windows natively directly in NumPy
             X_all = np.lib.stride_tricks.sliding_window_view(
-                features, (ai_strategy.window_size, 5)
+                features, (ai_strategy.window_size, 4)
             ).squeeze(axis=1)
             
             # Map index subset targets for PyTorch
@@ -253,8 +267,8 @@ def main():
                 predictions = np.array([])
             
             # Assign executed logic natively to signal arrays
-            buy_mask = predictions > 0.00
-            sell_mask = predictions < -0.01
+            buy_mask = predictions > 0.005
+            sell_mask = predictions < -0.005
             
             signals[start_eval_idx:end_eval_idx][buy_mask] = 1
             signals[start_eval_idx:end_eval_idx][sell_mask] = -1

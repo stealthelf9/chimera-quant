@@ -27,8 +27,8 @@ class AIStrategy(BaseStrategy):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[{name}] Initializing AI Strategy on device: {self.device}")
         
-        # Initialize model (Assuming input features: Open, High, Low, Close, Volume)
-        self.model = ChimeraNet(input_size=5).to(self.device)
+        # Initialize model (Assuming input features: Returns, Volume, RSI, MACD Hist)
+        self.model = ChimeraNet(input_size=4).to(self.device)
         self.model.eval()
         
         # Local state
@@ -44,13 +44,22 @@ class AIStrategy(BaseStrategy):
             return
             
         print(f"[{self.name}] Preparing training data from {len(view)} ticks...")
+        from python.strategies.indicators import Indicators
+        
+        closes = view['close']
+        returns = np.zeros_like(closes, dtype=np.float32)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, np.diff(closes) / closes[:-1])
+            
+        rsi = Indicators.rsi(self.buffer, timeperiod=14)
+        _, _, macdhist = Indicators.macd(self.buffer)
+        
         # Extract features natively
         features = np.column_stack((
-            view['open'],
-            view['high'],
-            view['low'],
-            view['close'],
-            view['volume']
+            returns,
+            view['volume'],
+            rsi,
+            macdhist
         )).astype(np.float32)
 
         # Standardize features (Z-Score Normalization)
@@ -61,7 +70,7 @@ class AIStrategy(BaseStrategy):
         features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 1. Vectorized sliding window for X
-        X = np.lib.stride_tricks.sliding_window_view(features[:-1], (self.window_size, 5)).squeeze(axis=1)
+        X = np.lib.stride_tricks.sliding_window_view(features[:-1], (self.window_size, 4)).squeeze(axis=1)
 
         # 2. Vectorized target for y (Percentage Return)
         closes = view['close'].astype(np.float32)
