@@ -108,34 +108,22 @@ def main():
         
         if args.symbols != "ALL":
             target_tickers = [s.strip().upper() for s in args.symbols.split(",")]
-            target_ids = []
+            target_ids_to_process = []
             for t in target_tickers:
                 if t in ticker_map:
-                    target_ids.append(ticker_map[t])
+                    target_ids_to_process.append(ticker_map[t])
                 else:
                     print(f"Warning: Ticker {t} not found in DB symbology.")
                     
-            if not target_ids:
+            if not target_ids_to_process:
                 print("No valid target instruments found to filter. Exiting.")
                 return
-                
-            # Use the first parsed instrument ID for the C++ Backtest Simulator
-            target_id = target_ids[0]
-            if len(target_ids) > 1:
-                print(f"Note: Current C++ engine isolates 1 instrument per analysis sequence. Using {target_tickers[0]} (ID: {target_id})")
-            else:
-                print(f"Filtering down to target instrument: {target_tickers[0]} (ID: {target_id})")
-                
-            data_engine = data_engine.filter_by_instrument(target_id)
-            total_ticks = len(data_engine.get_buffer_view())
-            print(f"Filtered down to {total_ticks} ticks for isolated metric analysis.")
+            print(f"Targeting {len(target_ids_to_process)} instruments.")
+        else:
+            target_ids_to_process = instrument_ids.tolist()
+            print(f"Targeting ALL {len(target_ids_to_process)} instruments dynamically.")
             
-        elif len(instrument_ids) >= 1:
-            target_id = int(instrument_ids[np.argmax(counts)])
-            print(f"Auto-selected most active instrument ID: {target_id} with {np.max(counts)} ticks in timeframe.")
-            data_engine = data_engine.filter_by_instrument(target_id)
-            total_ticks = len(data_engine.get_buffer_view())
-            print(f"Filtered down to {total_ticks} ticks for isolated metric analysis.")
+        total_ticks = len(data_engine.get_buffer_view())
 
     if total_ticks < 100:
         print("Not enough data to train/backtest. Exiting.")
@@ -163,17 +151,26 @@ def main():
         train_size = int(total_ticks * 0.8)
         ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
         
+        file_prefix = "UNIVERSAL" if args.symbols == "ALL" else args.symbols.replace(',', '_')
+        
         if args.mode == "train":
-            ai_strategy.buffer = data_engine.slice(0, train_size)
-            ai_strategy.train(epochs=args.epochs, batch_size=args.batch_size)
+            for t_id in target_ids_to_process:
+                sub_engine = data_engine.filter_by_instrument(t_id)
+                train_size = int(len(sub_engine.get_buffer_view()) * 0.8)
+                if train_size < 100:
+                    continue
+                ai_strategy.buffer = sub_engine.slice(0, train_size)
+                print(f"\n--- Training on Instrument ID: {t_id} ---")
+                ai_strategy.train(epochs=args.epochs, batch_size=args.batch_size)
+                
             # Save weights
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             os.makedirs(weights_dir, exist_ok=True)
             import torch
-            torch.save(ai_strategy.model.state_dict(), os.path.join(weights_dir, "chimeranet_latest.pt"))
-            np.save(os.path.join(weights_dir, "feature_mean.npy"), ai_strategy.feature_mean)
-            np.save(os.path.join(weights_dir, "feature_std.npy"), ai_strategy.feature_std)
-            print("Training finished and weights/scalers saved natively.")
+            torch.save(ai_strategy.model.state_dict(), os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt"))
+            np.save(os.path.join(weights_dir, f"feature_mean_{file_prefix}.npy"), ai_strategy.feature_mean)
+            np.save(os.path.join(weights_dir, f"feature_std_{file_prefix}.npy"), ai_strategy.feature_std)
+            print(f"Training finished and Universal weights/scalers saved natively as {file_prefix}.")
             return
 
         elif args.mode == "backtest":
@@ -183,9 +180,9 @@ def main():
             print("=========================================\n")
             
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
-            weights_path = os.path.join(weights_dir, "chimeranet_latest.pt")
-            mean_path = os.path.join(weights_dir, "feature_mean.npy")
-            std_path = os.path.join(weights_dir, "feature_std.npy")
+            weights_path = os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt")
+            mean_path = os.path.join(weights_dir, f"feature_mean_{file_prefix}.npy")
+            std_path = os.path.join(weights_dir, f"feature_std_{file_prefix}.npy")
             if os.path.exists(weights_path):
                 import torch
                 ai_strategy.model.load_state_dict(torch.load(weights_path, map_location=ai_strategy.device, weights_only=True))
@@ -200,82 +197,89 @@ def main():
             start_ns = date_to_nanos(args.start_date)
             end_ns = date_to_nanos(args.end_date) if args.end_date else 0xFFFFFFFFFFFFFFFF
             
-            mask = (view['timestamp'] >= start_ns) & (view['timestamp'] <= end_ns)
-            valid_indices = np.where(mask)[0]
-            
-            if len(valid_indices) == 0:
-                print("No data in requested timeframe.")
-                import sys
-                sys.exit(0)
+            for t_id in target_ids_to_process:
+                # Isolate sub-engine to prevent MSFT->AAPL diff spiking
+                sub_engine = data_engine.filter_by_instrument(t_id)
+                sub_view = sub_engine.get_buffer_view()
+                if len(sub_view) < ai_strategy.window_size + 10:
+                    continue
                 
-            start_eval_idx = max(ai_strategy.window_size, valid_indices[0])
-            end_eval_idx = valid_indices[-1] + 1
-            
-            # Calculate stationary features
-            closes = view['close']
-            returns = np.zeros_like(closes, dtype=np.float32)
-            with np.errstate(divide='ignore', invalid='ignore'):
-                returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, np.diff(closes) / closes[:-1])
+                mask = (sub_view['timestamp'] >= start_ns) & (sub_view['timestamp'] <= end_ns)
+                valid_indices = np.where(mask)[0]
+                if len(valid_indices) == 0:
+                    continue
+                    
+                start_eval_idx = max(ai_strategy.window_size, valid_indices[0])
+                end_eval_idx = valid_indices[-1] + 1
                 
-            from python.strategies.indicators import Indicators
-            rsi = Indicators.rsi(data_engine, timeperiod=14)
-            _, _, macdhist = Indicators.macd(data_engine)
+                # Calculate stationary features
+                closes = sub_view['close']
+                returns = np.zeros_like(closes, dtype=np.float32)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, ((closes[1:] - closes[:-1]) / closes[:-1]) * 100.0)
+                    
+                from python.strategies.indicators import Indicators
+                rsi = Indicators.rsi(sub_engine, timeperiod=14)
+                _, _, macdhist = Indicators.macd(sub_engine)
 
-            # Extract features fully padded
-            features = np.column_stack((
-                returns,
-                view['volume'],
-                rsi,
-                macdhist
-            )).astype(np.float32)
+                # Extract features fully padded
+                features = np.column_stack((
+                    returns,
+                    sub_view['volume'],
+                    rsi,
+                    macdhist
+                )).astype(np.float32)
 
-            if hasattr(ai_strategy, 'feature_mean') and hasattr(ai_strategy, 'feature_std'):
-                features = (features - ai_strategy.feature_mean) / ai_strategy.feature_std
-                
-            features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+                if hasattr(ai_strategy, 'feature_mean') and hasattr(ai_strategy, 'feature_std'):
+                    features = (features - ai_strategy.feature_mean) / ai_strategy.feature_std
+                    
+                features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
-            # Generate Sliding Windows natively directly in NumPy
-            X_all = np.lib.stride_tricks.sliding_window_view(
-                features, (ai_strategy.window_size, 4)
-            ).squeeze(axis=1)
-            
-            # Map index subset targets for PyTorch
-            valid_X = X_all[start_eval_idx - ai_strategy.window_size : end_eval_idx - ai_strategy.window_size]
-            
-            if len(valid_X) == 0:
-                print("Not enough contiguous data for AI evaluation window.")
-                import sys
-                sys.exit(0)
-            
-            # Use chunks so we don't overflow AMD ROCm LSTM max-sequence sizes in one pass
-            chunk_size = 16384
-            all_preds = []
-            
-            with torch.no_grad():
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", UserWarning)
-                    X_tensor = torch.tensor(valid_X.copy(), dtype=torch.float32).to(ai_strategy.device)
+                # Generate Sliding Windows natively directly in NumPy
+                X_all = np.lib.stride_tricks.sliding_window_view(
+                    features, (ai_strategy.window_size, 4)
+                ).squeeze(axis=1)
                 
-                # Execute batched dataset forwards in chunks
-                for i in range(0, len(X_tensor), chunk_size):
-                    chunk = X_tensor[i : i + chunk_size]
-                    preds = ai_strategy.model(chunk).cpu().numpy().flatten()
-                    all_preds.append(preds)
-            
-            if all_preds:
-                predictions = np.concatenate(all_preds)
-            else:
-                predictions = np.array([])
-            
-            # Assign executed logic natively to signal arrays
-            buy_mask = predictions > 0.05
-            sell_mask = predictions < -0.05
-            
-            signals[start_eval_idx:end_eval_idx][buy_mask] = 1
-            signals[start_eval_idx:end_eval_idx][sell_mask] = -1
-            
-            print(f"Generated {np.sum(buy_mask)} BUYS and {np.sum(sell_mask)} SELLS")
+                # Map index subset targets for PyTorch
+                valid_X = X_all[start_eval_idx - ai_strategy.window_size : end_eval_idx - ai_strategy.window_size]
+                
+                if len(valid_X) == 0:
+                    continue
+                
+                chunk_size = 16384
+                all_preds = []
+                
+                with torch.no_grad():
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        X_tensor = torch.tensor(valid_X.copy(), dtype=torch.float32).to(ai_strategy.device)
+                    
+                    for i in range(0, len(X_tensor), chunk_size):
+                        chunk = X_tensor[i : i + chunk_size]
+                        preds = ai_strategy.model(chunk).cpu().numpy().flatten()
+                        all_preds.append(preds)
+                
+                if all_preds:
+                    predictions = np.concatenate(all_preds)
+                else:
+                    predictions = np.array([])
+                
+                # Assign executed logic natively to localized sub arrays
+                buy_mask = predictions > 0.05
+                sell_mask = predictions < -0.05
+                
+                # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
+                global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
+                global_indices_mapped = np.where(global_mask)[0]
+                
+                # Ensure mapping lengths align exactly
+                if len(global_indices_mapped) == len(predictions):
+                    signals[global_indices_mapped[buy_mask]] = 1
+                    signals[global_indices_mapped[sell_mask]] = -1
+                
+            print(f"Generated {np.sum(signals == 1)} BUYS and {np.sum(signals == -1)} SELLS")
+
 
     else:
         # Standard Indicator Logic (No PyTorch Initialization)
