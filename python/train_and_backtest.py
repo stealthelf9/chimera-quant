@@ -29,6 +29,8 @@ def parse_args():
     parser.add_argument("--stop-loss", type=float, default=0.05, help="Stop loss percentage (e.g., 0.05 for 5%)")
     parser.add_argument("--take-profit", type=float, default=0.10, help="Take profit percentage (e.g., 0.10 for 10%)")
     parser.add_argument("--shorting", action="store_true", help="Enable short selling")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=256, help="Training batch size")
     return parser.parse_args()
 
 def date_to_nanos(date_str: str) -> int:
@@ -163,7 +165,7 @@ def main():
         
         if args.mode == "train":
             ai_strategy.buffer = data_engine.slice(0, train_size)
-            ai_strategy.train(epochs=1, batch_size=16384)
+            ai_strategy.train(epochs=args.epochs, batch_size=args.batch_size)
             # Save weights
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             os.makedirs(weights_dir, exist_ok=True)
