@@ -63,8 +63,8 @@ class AIStrategy(BaseStrategy):
         )).astype(np.float32)
 
         # Standardize features (Z-Score Normalization)
-        self.feature_mean = np.mean(features, axis=0, dtype=np.float64)
-        self.feature_std = np.std(features, axis=0, dtype=np.float64)
+        self.feature_mean = np.nanmean(features, axis=0, dtype=np.float64)
+        self.feature_std = np.nanstd(features, axis=0, dtype=np.float64)
         self.feature_std[self.feature_std == 0] = 1.0 # Prevent div by zero
         features = ((features - self.feature_mean) / self.feature_std).astype(np.float32)
         features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
@@ -125,26 +125,32 @@ class AIStrategy(BaseStrategy):
         if len(view) < self.window_size:
             return
         
-        # Extract features (Zero-copy into NumPy, then onto PyTorch Tensor)
-        # Note: PyTorch requires a copy when moving from CPU to GPU
-        recent_data = view[-self.window_size:]
+        from python.strategies.indicators import Indicators
         
-        # Shape: (window_size, 5)
+        closes = view['close']
+        returns = np.zeros_like(closes, dtype=np.float32)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            returns[1:] = np.where(closes[:-1] < 1e-8, 0.0, np.diff(closes) / closes[:-1])
+            
+        rsi = Indicators.rsi(self.buffer, timeperiod=14)
+        _, _, macdhist = Indicators.macd(self.buffer)
+        
         features = np.column_stack((
-            recent_data['open'],
-            recent_data['high'],
-            recent_data['low'],
-            recent_data['close'],
-            recent_data['volume']
+            returns,
+            view['volume'],
+            rsi,
+            macdhist
         )).astype(np.float32)
 
         if hasattr(self, 'feature_mean') and hasattr(self, 'feature_std'):
             features = (features - self.feature_mean) / self.feature_std
 
         features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        recent_features = features[-self.window_size:]
 
         # Reshape for LSTM: (batch_size, sequence_length, input_size)
-        x_tensor = torch.tensor(features, dtype=torch.float32).unsqueeze(0).to(self.device)
+        x_tensor = torch.tensor(recent_features, dtype=torch.float32).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
             prediction = self.model(x_tensor)
