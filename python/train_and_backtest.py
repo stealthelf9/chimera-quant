@@ -225,7 +225,20 @@ def main():
             std_path = os.path.join(weights_dir, f"feature_std_{file_prefix}.npy")
             if os.path.exists(weights_path):
                 import torch
-                ai_strategy.model.load_state_dict(torch.load(weights_path, map_location=ai_strategy.device, weights_only=True))
+                state_dict = torch.load(weights_path, map_location=ai_strategy.device, weights_only=True)
+                
+                # Clean out the compiler prefixes dynamically
+                clean_dict = {}
+                for key, value in state_dict.items():
+                    clean_key = key.replace("_orig_mod.", "")
+                    clean_dict[clean_key] = value
+                
+                # Load the perfectly clean weights
+                if hasattr(ai_strategy.model, '_orig_mod'):
+                    ai_strategy.model._orig_mod.load_state_dict(clean_dict)
+                else:
+                    ai_strategy.model.load_state_dict(clean_dict)
+                
             if os.path.exists(mean_path) and os.path.exists(std_path):
                 ai_strategy.feature_mean = np.load(mean_path)
                 ai_strategy.feature_std = np.load(std_path)
@@ -306,8 +319,9 @@ def main():
                     predictions = np.array([])
                 
                 # Assign executed logic natively to localized sub arrays
-                buy_mask = predictions > 0.05
-                sell_mask = predictions < -0.05
+                # AI must predict at least a 0.75% jump to overcome broker fees!
+                buy_mask = predictions > 0.75
+                sell_mask = predictions < -0.75
                 
                 # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
                 global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
