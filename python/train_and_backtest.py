@@ -184,7 +184,11 @@ def main():
                 print("Global Scalers Computed.")
                 
             total_assets = len(target_ids_to_process)
+            import time
+            global_start_time = time.time()
+            
             for idx, t_id in enumerate(target_ids_to_process, start=1):
+                asset_start_time = time.time()
                 sub_engine = data_engine.filter_by_instrument(t_id)
                 train_size = int(len(sub_engine.get_buffer_view()) * 0.8)
                 if train_size < 100:
@@ -193,6 +197,12 @@ def main():
                 print(f"\n--- Training on Instrument ID: {t_id} [{idx}/{total_assets} Assets] ---")
                 ai_strategy.train(epochs=args.epochs, batch_size=args.batch_size)
                 
+                asset_elapsed = time.time() - asset_start_time
+                print(f"--- Asset {t_id} Completed in {asset_elapsed:.2f}s ---")
+                
+            global_elapsed = time.time() - global_start_time
+            print(f"\n--- All Assets Completed! Total Elapsed Time: {global_elapsed:.2f}s ---")
+            
             # Save weights
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             os.makedirs(weights_dir, exist_ok=True)

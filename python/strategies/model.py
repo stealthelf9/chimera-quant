@@ -29,6 +29,8 @@ class AIStrategy(BaseStrategy):
         
         # Initialize model (Assuming input features: Returns, Volume, RSI, MACD Hist)
         self.model = ChimeraNet(input_size=4).to(self.device)
+        if hasattr(torch, 'compile'):
+            self.model = torch.compile(self.model)
         self.model.eval()
         
         # Local state
@@ -86,35 +88,76 @@ class AIStrategy(BaseStrategy):
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            X_tensor = torch.from_numpy(X)
-            y_tensor = torch.from_numpy(y)
-
-        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+            # VRAM Pre-Loading: Directly cast and move full tensors to GPU to bypass CPU-bound DataLoaders
+            X_tensor = torch.from_numpy(X).to(self.device)
+            y_tensor = torch.from_numpy(y).to(self.device)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         
+        # AMP Scaler
+        scaler = torch.amp.GradScaler('cuda') if self.device.type == 'cuda' else None
+        
         self.model.train()
         print(f"[{self.name}] Starting Training (Device: {self.device})")
         
-        total_batches = len(dataloader)
+        num_samples = X_tensor.size(0)
+        total_batches = (num_samples + batch_size - 1) // batch_size
         
+        best_loss = float('inf')
+        patience = 5
+        patience_counter = 0
+
+        import time
+        import os
+        weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
+        os.makedirs(weights_dir, exist_ok=True)
+        checkpoint_path = os.path.join(weights_dir, f"chimeranet_checkpoint.pt")
+
         for epoch in range(epochs):
+            epoch_start_time = time.time()
             total_loss = 0
-            for i, (batch_X, batch_y) in enumerate(dataloader):
-                batch_X, batch_y = batch_X.to(self.device), batch_y.to(self.device)
+            
+            # Manual batch slicing executing directly natively on VRAM
+            for i in range(0, num_samples, batch_size):
+                batch_X = X_tensor[i : i + batch_size]
+                batch_y = y_tensor[i : i + batch_size]
+                
                 optimizer.zero_grad()
-                outputs = self.model(batch_X)
-                loss = criterion(outputs, batch_y)
-                loss.backward()
-                optimizer.step()
+                
+                if self.device.type == 'cuda':
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        outputs = self.model(batch_X)
+                        loss = criterion(outputs, batch_y)
+                    
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    outputs = self.model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    loss.backward()
+                    optimizer.step()
+                    
                 total_loss += loss.item()
                 
-            print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Average Loss: {total_loss/total_batches:.4f}")
+            epoch_elapsed = time.time() - epoch_start_time
+            avg_loss = total_loss / total_batches
+            print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Average Loss: {avg_loss:.4f} ({epoch_elapsed:.2f}s)")
+            
+            # Early Stopping Verification
+            if avg_loss < best_loss:
+                best_loss = avg_loss
+                patience_counter = 0
+                torch.save(self.model.state_dict(), checkpoint_path)
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"[{self.name}] Early Stopping Triggered at Epoch {epoch+1}")
+                    break
 
         self.model.eval()
-        print(f"[{self.name}] Training Complete.")
+        print(f"[{self.name}] Training Complete. Best Loss: {best_loss:.4f}")
 
     def evaluate(self):
         # We need at least window_size ticks to make a prediction
