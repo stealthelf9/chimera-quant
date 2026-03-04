@@ -5,6 +5,9 @@ import argparse
 from datetime import datetime
 import numpy as np
 import databento as db
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Ensure CMake build output is in PYTHONPATH for the chimera_core C++ module
 BUILD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "build")
@@ -160,6 +163,7 @@ def main():
         file_prefix = args.model_name
         
         if args.mode == "train":
+            completed_assets = []
             if args.resume:
                 print(f"\n--- Resuming from previous weights: {file_prefix} ---")
                 weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
@@ -168,7 +172,12 @@ def main():
                 std_path = os.path.join(weights_dir, f"feature_std_{file_prefix}.npy")
                 if os.path.exists(weights_path):
                     import torch
-                    state_dict = torch.load(weights_path, map_location=ai_strategy.device, weights_only=True)
+                    checkpoint = torch.load(weights_path, map_location=ai_strategy.device, weights_only=False)
+                    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                        state_dict = checkpoint['model_state_dict']
+                        completed_assets = checkpoint.get('completed_assets', [])
+                    else:
+                        state_dict = checkpoint
                     clean_dict = {}
                     for key, value in state_dict.items():
                         clean_key = key.replace("_orig_mod.", "")
@@ -224,6 +233,10 @@ def main():
             
             try:
                 for idx, t_id in enumerate(target_ids_to_process, start=1):
+                    if t_id in completed_assets:
+                        print(f"Skipping Asset {t_id} (Already trained in checkpoint)")
+                        continue
+
                     asset_start_time = time.time()
                     sub_engine = data_engine.filter_by_instrument(t_id)
                     train_size = int(len(sub_engine.get_buffer_view()) * 0.8)
@@ -235,6 +248,7 @@ def main():
                     
                     asset_elapsed = time.time() - asset_start_time
                     print(f"--- Asset {t_id} Completed in {asset_elapsed:.2f}s ---")
+                    completed_assets.append(t_id)
                     
                 global_elapsed = time.time() - global_start_time
                 print(f"\n--- All Assets Completed! Total Elapsed Time: {global_elapsed:.2f}s ---")
@@ -245,7 +259,10 @@ def main():
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             os.makedirs(weights_dir, exist_ok=True)
             import torch
-            torch.save(ai_strategy.model.state_dict(), os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt"))
+            torch.save({
+                'model_state_dict': ai_strategy.model.state_dict(),
+                'completed_assets': completed_assets
+            }, os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt"))
             np.save(os.path.join(weights_dir, f"feature_mean_{file_prefix}.npy"), ai_strategy.feature_mean)
             np.save(os.path.join(weights_dir, f"feature_std_{file_prefix}.npy"), ai_strategy.feature_std)
             print(f"Training finished and Universal weights/scalers saved natively as {file_prefix}.")
@@ -263,7 +280,11 @@ def main():
             std_path = os.path.join(weights_dir, f"feature_std_{file_prefix}.npy")
             if os.path.exists(weights_path):
                 import torch
-                state_dict = torch.load(weights_path, map_location=ai_strategy.device, weights_only=True)
+                checkpoint = torch.load(weights_path, map_location=ai_strategy.device, weights_only=False)
+                if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                    state_dict = checkpoint['model_state_dict']
+                else:
+                    state_dict = checkpoint
                 
                 # Clean out the compiler prefixes dynamically
                 clean_dict = {}
