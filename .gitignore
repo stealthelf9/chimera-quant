@@ -3,4 +3,6 @@ data/
 build/
 __pycache__/
 .vscode
-weights/*
+/weights/*
+backtest.sh
+train.sh

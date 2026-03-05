@@ -269,10 +269,6 @@ def main():
             return
 
         elif args.mode == "backtest":
-            print("\n=========================================")
-            print("WARNING: Feature space has drastically changed to 4 Stationary Metrics (Returns, Volume, RSI, MACDHist).")
-            print("Ensure you run --mode train again before running backtests or PyTorch LSTM Tensor dimensions will mismatch!")
-            print("=========================================\n")
             
             weights_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "weights")
             weights_path = os.path.join(weights_dir, f"chimeranet_{file_prefix}.pt")
@@ -377,19 +373,43 @@ def main():
                 else:
                     predictions = np.array([])
                 
-                # Assign executed logic natively to localized sub arrays
-                buy_mask = predictions > 0.05
-                sell_mask = predictions < -0.30
+                # Z-Score Hysteresis Band
+                # The Titanium Gun: Top 0.05% of momentum anomalies only
+                buy_mask = predictions > 4.0
+                
+                # Emergency eject only
+                sell_mask = predictions < -4.0
                 
                 # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
                 global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
                 global_indices_mapped = np.where(global_mask)[0]
                 
                 # Ensure mapping lengths align exactly
+                # Ensure mapping lengths align exactly
                 if len(global_indices_mapped) == len(predictions):
                     signals[global_indices_mapped[buy_mask]] = 1
                     signals[global_indices_mapped[sell_mask]] = -1
-                
+            
+            # --- INSTITUTIONAL LUNCHTIME FILTER (GLOBAL BATCH) ---
+            print("\n--- Applying Institutional Time-of-Day Filter ---")
+            import pandas as pd
+            
+            # Convert the raw nanosecond timestamps to New York Time
+            dt_index = pd.to_datetime(view['timestamp'], unit='ns', utc=True).tz_convert('America/New_York')
+            hours = dt_index.hour
+            minutes = dt_index.minute
+            
+            # Create a mask for the "Lunchtime Chop" (11:30 AM to 1:30 PM EST)
+            # We also block the first 5 minutes of the day (9:30-9:35) to avoid opening print chaos
+            lunch_mask = ((hours == 11) & (minutes >= 30)) | (hours == 12) | ((hours == 13) & (minutes < 30))
+            open_chaos_mask = (hours == 9) & (minutes < 35)
+            
+            toxic_hours_mask = lunch_mask | open_chaos_mask
+            
+            # Erase BOTH Long and Short entry signals during toxic hours
+            signals[(toxic_hours_mask) & (signals == 1)] = 0
+            signals[(toxic_hours_mask) & (signals == -1)] = 0
+            
             print(f"Generated {np.sum(signals == 1)} BUYS and {np.sum(signals == -1)} SELLS")
 
 

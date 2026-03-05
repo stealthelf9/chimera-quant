@@ -1,3 +1,5 @@
+#!/bin/bash
+
 python python/train_and_backtest.py \
     --mode backtest \
     --dataset equs \
@@ -8,6 +10,9 @@ python python/train_and_backtest.py \
     --timeframe 1m \
     --capital 10000 \
     --position-size 0.05 \
-    --commission 0.005 \
-    --slippage 0.005 \
+    --commission 0.00 \
+    --slippage 0.0001 \
+    --stop-loss 0.003 \
+    --take-profit 0.006 \
+    --shorting \
     --symbols ALL
