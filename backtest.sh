@@ -9,10 +9,11 @@ python python/train_and_backtest.py \
     --strategies ai \
     --timeframe 1m \
     --capital 10000 \
-    --position-size 0.05 \
-    --commission 0.00 \
-    --slippage 0.0001 \
+    --position-size 0.1 \
+    --commission 0.005 \
+    --slippage 0.005 \
+    --buy-threshold 5.0 \
+    --sell-threshold -5.0 \
     --stop-loss 0.003 \
     --take-profit 0.006 \
-    --shorting \
     --symbols ALL

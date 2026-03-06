@@ -37,6 +37,8 @@ def parse_args():
     parser.add_argument("--shorting", action="store_true", help="Enable short selling")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=256, help="Training batch size")
+    parser.add_argument("--buy-threshold", type=float, default=4.0, help="Buy threshold Z-Score")
+    parser.add_argument("--sell-threshold", type=float, default=-4.0, help="Sell threshold Z-Score")
     return parser.parse_args()
 
 def date_to_nanos(date_str: str) -> int:
@@ -374,21 +376,18 @@ def main():
                     predictions = np.array([])
                 
                 # Z-Score Hysteresis Band
-                # The Titanium Gun: Top 0.05% of momentum anomalies only
-                buy_mask = predictions > 4.0
-                
-                # Emergency eject only
-                sell_mask = predictions < -4.0
+                buy_mask = predictions > args.buy_threshold
+                sell_mask = predictions < args.sell_threshold
                 
                 # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
                 global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
                 global_indices_mapped = np.where(global_mask)[0]
                 
                 # Ensure mapping lengths align exactly
-                # Ensure mapping lengths align exactly
                 if len(global_indices_mapped) == len(predictions):
                     signals[global_indices_mapped[buy_mask]] = 1
-                    signals[global_indices_mapped[sell_mask]] = -1
+                    if args.shorting:
+                        signals[global_indices_mapped[sell_mask]] = -1
             
             # --- INSTITUTIONAL LUNCHTIME FILTER (GLOBAL BATCH) ---
             print("\n--- Applying Institutional Time-of-Day Filter ---")
@@ -408,7 +407,6 @@ def main():
             
             # Erase BOTH Long and Short entry signals during toxic hours
             signals[(toxic_hours_mask) & (signals == 1)] = 0
-            signals[(toxic_hours_mask) & (signals == -1)] = 0
             
             print(f"Generated {np.sum(signals == 1)} BUYS and {np.sum(signals == -1)} SELLS")
 
