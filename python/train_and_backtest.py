@@ -158,6 +158,7 @@ def main():
     strategies_list = [s.strip().lower() for s in args.strategies.split(",")]
     signals = np.zeros(total_ticks, dtype=np.int32)
     
+    ai_strategy = None
     if "ai" in strategies_list:
         train_size = int(total_ticks * 0.8)
         ai_strategy = AIStrategy(name="ChimeraNet_Alpha", params={"window_size": 30})
@@ -218,8 +219,9 @@ def main():
                 from python.strategies.indicators import Indicators
                 rsi = Indicators.rsi(sub_engine.slice(0, train_size), timeperiod=14)
                 _, _, macdhist = Indicators.macd(sub_engine.slice(0, train_size))
+                sentiment = np.zeros_like(returns)
                 
-                features = np.column_stack((returns, view['volume'], rsi, macdhist)).astype(np.float32)
+                features = np.column_stack((returns, view['volume'], rsi, macdhist, sentiment)).astype(np.float32)
                 all_features.append(features)
                 
             if all_features:
@@ -332,12 +334,38 @@ def main():
                 rsi = Indicators.rsi(sub_engine, timeperiod=14)
                 _, _, macdhist = Indicators.macd(sub_engine)
 
+                # Retrieve sentiment from Cache using string representation of timestamps
+                from python.strategies.sentiment_cache import SentimentCache
+                sentiment_cache = SentimentCache()
+                sentiment = np.zeros_like(returns)
+                import pandas as pd
+                dt_index = pd.to_datetime(sub_view['timestamp'], unit='ns', utc=True)
+                dates = dt_index.strftime('%Y-%m-%d').to_numpy()
+                # Finding the string ticker for the given t_id
+                ticker = None
+                for t, t_id_map in ticker_map.items():
+                    if t_id_map == t_id:
+                        ticker = t
+                        break
+
+                if ticker:
+                    # In a real scenario, this loops quickly or vectorizes
+                    # For performance, we pre-fetch from the cache.
+                    unique_dates = np.unique(dates)
+                    date_to_sentiment = {}
+                    for d in unique_dates:
+                        date_to_sentiment[d] = sentiment_cache.get_sentiment(ticker, d)
+
+                    for i, d in enumerate(dates):
+                        sentiment[i] = date_to_sentiment.get(d, 0.0)
+
                 # Extract features fully padded
                 features = np.column_stack((
                     returns,
                     sub_view['volume'],
                     rsi,
-                    macdhist
+                    macdhist,
+                    sentiment
                 )).astype(np.float32)
 
                 if hasattr(ai_strategy, 'feature_mean') and hasattr(ai_strategy, 'feature_std'):
@@ -347,7 +375,7 @@ def main():
 
                 # Generate Sliding Windows natively directly in NumPy
                 X_all = np.lib.stride_tricks.sliding_window_view(
-                    features, (ai_strategy.window_size, 4)
+                    features, (ai_strategy.window_size, 5)
                 ).squeeze(axis=1)
                 
                 # Map index subset targets for PyTorch
@@ -367,7 +395,9 @@ def main():
                     
                     for i in range(0, len(X_tensor), chunk_size):
                         chunk = X_tensor[i : i + chunk_size]
-                        preds = ai_strategy.model(chunk).cpu().numpy().flatten()
+                        # Output is shape (batch_size, 3) where 0=Hold, 1=Buy, 2=Sell
+                        q_values = ai_strategy.model(chunk)
+                        preds = torch.argmax(q_values, dim=1).cpu().numpy().flatten()
                         all_preds.append(preds)
                 
                 if all_preds:
@@ -375,9 +405,9 @@ def main():
                 else:
                     predictions = np.array([])
                 
-                # Z-Score Hysteresis Band
-                buy_mask = predictions > args.buy_threshold
-                sell_mask = predictions < args.sell_threshold
+                # Directly use the action IDs from DQN
+                buy_mask = predictions == 1
+                sell_mask = predictions == 2
                 
                 # We map the local sub_view start_eval_idx back directly to global view indices via timestamp mapping
                 global_mask = (view['instrument_id'] == t_id) & (view['timestamp'] >= sub_view['timestamp'][start_eval_idx]) & (view['timestamp'] <= sub_view['timestamp'][end_eval_idx - 1])
@@ -389,46 +419,117 @@ def main():
                     if args.shorting:
                         signals[global_indices_mapped[sell_mask]] = -1
             
-            # --- INSTITUTIONAL LUNCHTIME FILTER (GLOBAL BATCH) ---
-            print("\n--- Applying Institutional Time-of-Day Filter ---")
-            import pandas as pd
-            
-            # Convert the raw nanosecond timestamps to New York Time
-            dt_index = pd.to_datetime(view['timestamp'], unit='ns', utc=True).tz_convert('America/New_York')
-            hours = dt_index.hour
-            minutes = dt_index.minute
-            
-            # Create a mask for the "Lunchtime Chop" (11:30 AM to 1:30 PM EST)
-            # We also block the first 5 minutes of the day (9:30-9:35) to avoid opening print chaos
-            lunch_mask = ((hours == 11) & (minutes >= 30)) | (hours == 12) | ((hours == 13) & (minutes < 30))
-            open_chaos_mask = (hours == 9) & (minutes < 35)
-            
-            toxic_hours_mask = lunch_mask | open_chaos_mask
-            
-            # Erase BOTH Long and Short entry signals during toxic hours
-            signals[(toxic_hours_mask) & (signals == 1)] = 0
-            
-            print(f"Generated {np.sum(signals == 1)} BUYS and {np.sum(signals == -1)} SELLS")
 
-
-    else:
-        # Standard Indicator Logic (No PyTorch Initialization)
-        print("\n--- Generating Standard Indicator Predictions (Vectorized) ---")
+    # Process Other Strategies
+    if args.mode == "backtest":
         if "rsi" in strategies_list:
+            print("\n--- Applying RSI Strategy ---")
             from python.strategies.indicators import Indicators
             rsi_array = Indicators.rsi(data_engine, timeperiod=14)
             if len(rsi_array) > 0:
                 valid_idx = ~np.isnan(rsi_array)
-                signals[valid_idx & (rsi_array < 30)] = 1
-                signals[valid_idx & (rsi_array > 70)] = -1
+                # If we have existing signals (e.g. from AI), we combine them. Otherwise, we just set them.
+                rsi_signals = np.zeros(total_ticks, dtype=np.int32)
+                rsi_signals[valid_idx & (rsi_array < 30)] = 1
+                rsi_signals[valid_idx & (rsi_array > 70)] = -1
                 
-        elif "macd" in strategies_list:
+                # Simple ensemble: If both agree, signal. If only RSI is used, just use RSI.
+                if np.any(signals != 0):
+                    signals[(signals == 1) & (rsi_signals != 1)] = 0 # Cancel buys if RSI disagrees
+                    if args.shorting:
+                        signals[(signals == -1) & (rsi_signals != -1)] = 0 # Cancel sells if RSI disagrees
+                else:
+                    signals = rsi_signals
+
+        if "macd" in strategies_list:
+            print("\n--- Applying MACD Strategy ---")
             from python.strategies.indicators import Indicators
             macd, macdsignal, macdhist = Indicators.macd(data_engine)
             if len(macd) > 0:
                 valid_idx = ~np.isnan(macd) & ~np.isnan(macdsignal)
-                signals[valid_idx & (macd > macdsignal)] = 1
-                signals[valid_idx & (macd < macdsignal)] = -1
+                macd_signals = np.zeros(total_ticks, dtype=np.int32)
+                macd_signals[valid_idx & (macd > macdsignal)] = 1
+                macd_signals[valid_idx & (macd < macdsignal)] = -1
+
+                if np.any(signals != 0):
+                    signals[(signals == 1) & (macd_signals != 1)] = 0
+                    if args.shorting:
+                        signals[(signals == -1) & (macd_signals != -1)] = 0
+                else:
+                    signals = macd_signals
+
+        if "sentiment" in strategies_list:
+            print("\n--- Pre-fetching and Applying Sentiment Filter ---")
+            # Apply real historical sentiment from the cache
+            from python.strategies.sentiment_cache import SentimentCache
+            sentiment_cache = SentimentCache()
+
+            # Fetch cache if missing
+            if args.start_date and args.end_date:
+                 all_tickers = list(ticker_map.keys())
+                 if args.symbols != "ALL":
+                     all_tickers = [s.strip().upper() for s in args.symbols.split(",")]
+                 print(f"Ensuring news cache is hydrated for {len(all_tickers)} symbols...")
+                 sentiment_cache.fetch_and_cache_range(all_tickers, args.start_date, args.end_date)
+
+            # Since backtest executes on pre-cached data, we check sentiment for each instrument/tick
+            view = data_engine.get_buffer_view()
+            import pandas as pd
+            dt_index = pd.to_datetime(view['timestamp'], unit='ns', utc=True)
+            dates = dt_index.strftime('%Y-%m-%d').to_numpy()
+
+            # Map ticker IDs back to strings to look up in cache
+            t_id_to_ticker = {v: k for k, v in ticker_map.items()}
+
+            # Fast vectorized application
+            drop_mask = np.zeros(total_ticks, dtype=bool)
+            unique_dates = np.unique(dates)
+
+            for t_id in np.unique(view['instrument_id']):
+                ticker = t_id_to_ticker.get(t_id)
+                if not ticker:
+                    continue
+
+                # Pre-fetch scores for this ticker
+                date_to_score = {d: sentiment_cache.get_sentiment(ticker, d) for d in unique_dates}
+
+                # Apply to mask
+                t_mask = (view['instrument_id'] == t_id)
+                t_dates = dates[t_mask]
+
+                # Vectorized map
+                scores = np.array([date_to_score.get(d, 0.0) for d in t_dates])
+                bad_sentiment = scores < -0.5
+
+                # Update global drop mask
+                drop_mask[np.where(t_mask)[0][bad_sentiment]] = True
+
+            print(f"Sentiment filter dropping {np.sum(drop_mask)} signals due to strong negative sentiment.")
+            signals[drop_mask & (signals == 1)] = 0
+            if args.shorting:
+                signals[drop_mask & (signals == -1)] = 0
+
+        # --- INSTITUTIONAL LUNCHTIME FILTER (GLOBAL BATCH) ---
+        print("\n--- Applying Institutional Time-of-Day Filter ---")
+        import pandas as pd
+
+        view = data_engine.get_buffer_view()
+        # Convert the raw nanosecond timestamps to New York Time
+        dt_index = pd.to_datetime(view['timestamp'], unit='ns', utc=True).tz_convert('America/New_York')
+        hours = dt_index.hour
+        minutes = dt_index.minute
+
+        # Create a mask for the "Lunchtime Chop" (11:30 AM to 1:30 PM EST)
+        # We also block the first 5 minutes of the day (9:30-9:35) to avoid opening print chaos
+        lunch_mask = ((hours == 11) & (minutes >= 30)) | (hours == 12) | ((hours == 13) & (minutes < 30))
+        open_chaos_mask = (hours == 9) & (minutes < 35)
+
+        toxic_hours_mask = lunch_mask | open_chaos_mask
+
+        # Erase BOTH Long and Short entry signals during toxic hours
+        signals[(toxic_hours_mask) & (signals == 1)] = 0
+
+        print(f"Generated {np.sum(signals == 1)} BUYS and {np.sum(signals == -1)} SELLS")
 
     if args.mode == "backtest":
         print("\n--- Executing C++ Strategy Logic Simulator ---")

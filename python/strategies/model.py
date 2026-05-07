@@ -5,15 +5,51 @@ import chimera_core
 from python.strategies.base import BaseStrategy
 
 class ChimeraNet(nn.Module):
-    def __init__(self, input_size: int, hidden_size: int = 128, num_layers: int = 2):
+    """
+    Lightweight Transformer Encoder + DQN Head for Reinforcement Learning.
+    Input shape: (batch_size, sequence_length, features)
+    Output shape: (batch_size, action_space) -> Q-values for (Hold, Buy, Sell)
+    """
+    def __init__(self, input_size: int = 5, d_model: int = 64, nhead: int = 4, num_layers: int = 2, action_space: int = 3):
         super(ChimeraNet, self).__init__()
-        # LSTM for temporal series prediction
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, 1)
+
+        # Linear layer to project input features to d_model size
+        self.input_projection = nn.Linear(input_size, d_model)
+
+        # Positional Encoding to inject sequence order info
+        self.max_len = 1000
+        pe = torch.zeros(self.max_len, d_model)
+        position = torch.arange(0, self.max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe.unsqueeze(0))
+
+        # Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=d_model * 4,
+            dropout=0.1,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # DQN Action Head (Hold=0, Buy=1, Sell=2)
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, 32),
+            nn.ReLU(),
+            nn.Linear(32, action_space)
+        )
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        out = self.fc(out[:, -1, :])
+        # x is (batch_size, seq_len, features)
+        x = self.input_projection(x)  # -> (batch_size, seq_len, d_model)
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len, :]
+        out = self.transformer(x)     # -> (batch_size, seq_len, d_model)
+        # Take the output of the last time step for DQN
+        out = self.fc(out[:, -1, :])  # -> (batch_size, action_space)
         return out
 
 class AIStrategy(BaseStrategy):
@@ -27,8 +63,12 @@ class AIStrategy(BaseStrategy):
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"[{name}] Initializing AI Strategy on device: {self.device}")
         
-        # Initialize model (Assuming input features: Returns, Volume, RSI, MACD Hist)
-        self.model = ChimeraNet(input_size=4).to(self.device)
+        # Initialize model (Assuming input features: Returns, Volume, RSI, MACD Hist, Sentiment)
+        self.model = ChimeraNet(input_size=5).to(self.device)
+        self.target_model = ChimeraNet(input_size=5).to(self.device)
+        self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model.eval()
+
         if hasattr(torch, 'compile'):
             self.model = torch.compile(self.model)
         self.model.eval()
@@ -56,12 +96,18 @@ class AIStrategy(BaseStrategy):
         rsi = Indicators.rsi(self.buffer, timeperiod=14)
         _, _, macdhist = Indicators.macd(self.buffer)
         
+        # Integrate Sentiment logic. In a real system we fetch from cache.
+        # For simplicity and backtest speed here, we pass a neutral sentiment (0)
+        # However the network architecture is now built to accept it (5 features).
+        sentiment = np.zeros_like(returns)
+
         # Extract features natively
         features = np.column_stack((
             returns,
             view['volume'],
             rsi,
-            macdhist
+            macdhist,
+            sentiment
         )).astype(np.float32)
 
         # Standardize features (Z-Score Normalization)
@@ -73,9 +119,9 @@ class AIStrategy(BaseStrategy):
         features = np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
         # 1. Vectorized sliding window for X
-        X = np.lib.stride_tricks.sliding_window_view(features[:-1], (self.window_size, 4)).squeeze(axis=1)
+        X = np.lib.stride_tricks.sliding_window_view(features[:-1], (self.window_size, 5)).squeeze(axis=1)
 
-        # 2. Vectorized target for y (Percentage Return)
+        # 2. Extract forward returns to compute rewards for RL (Hold, Buy, Sell)
         closes = view['close'].astype(np.float32)
         curr_closes = closes[self.window_size - 1 : -1]
         next_closes = closes[self.window_size :]
@@ -83,14 +129,21 @@ class AIStrategy(BaseStrategy):
         with np.errstate(divide='ignore', invalid='ignore'):
             pct_returns = np.where(curr_closes < 1e-8, 0.0, ((next_closes - curr_closes) / curr_closes) * 100.0)
             
-        y = np.clip(pct_returns, -10.0, 10.0).reshape(-1, 1).astype(np.float32)
+        returns_fwd = np.clip(pct_returns, -10.0, 10.0)
+
+        # For Offline DQN, we will generate a mock replay buffer from historical states.
+        # Action space: 0=Hold, 1=Buy, 2=Sell
+        # Reward function:
+        # Action Buy (1): +return
+        # Action Sell (2): -return
+        # Action Hold (0): 0
 
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            # VRAM Pre-Loading: Directly cast and move full tensors to GPU to bypass CPU-bound DataLoaders
-            X_tensor = torch.from_numpy(X).to(self.device)
-            y_tensor = torch.from_numpy(y).to(self.device)
+            states = torch.from_numpy(X).to(self.device)
+            next_states = torch.cat((states[1:], states[-1:])) # approximate next state
+            rewards_fwd = torch.from_numpy(returns_fwd).to(self.device)
 
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
@@ -99,14 +152,15 @@ class AIStrategy(BaseStrategy):
         scaler = torch.amp.GradScaler('cuda') if self.device.type == 'cuda' else None
         
         self.model.train()
-        print(f"[{self.name}] Starting Training (Device: {self.device})")
+        print(f"[{self.name}] Starting Training Offline DQN (Device: {self.device})")
         
-        num_samples = X_tensor.size(0)
+        num_samples = states.size(0)
         total_batches = (num_samples + batch_size - 1) // batch_size
         
         best_loss = float('inf')
         patience = 5
         patience_counter = 0
+        gamma = 0.99
 
         import time
         import os
@@ -118,29 +172,69 @@ class AIStrategy(BaseStrategy):
             epoch_start_time = time.time()
             total_loss = 0
             
-            # Manual batch slicing executing directly natively on VRAM
+            # Shuffle data indices for offline RL
+            indices = torch.randperm(num_samples)
+            states = states[indices]
+            next_states = next_states[indices]
+            rewards_fwd = rewards_fwd[indices]
+
             for i in range(0, num_samples, batch_size):
-                batch_X = X_tensor[i : i + batch_size]
-                batch_y = y_tensor[i : i + batch_size]
+                b_states = states[i : i + batch_size]
+                b_next_states = next_states[i : i + batch_size]
+                b_returns = rewards_fwd[i : i + batch_size]
                 
                 optimizer.zero_grad()
                 
                 if self.device.type == 'cuda':
                     with torch.autocast(device_type='cuda', dtype=torch.float16):
-                        outputs = self.model(batch_X)
-                        loss = criterion(outputs, batch_y)
+                        # Current Q Values
+                        q_values = self.model(b_states)
+
+                        # Simulate max reward logic for offline DQN using known future
+                        # For each state, the best action retrospectively:
+                        # If b_returns > 0: Best is Buy (1). Reward is b_returns.
+                        # If b_returns < 0: Best is Sell (2). Reward is -b_returns.
+                        # If abs(b_returns) is small: Best is Hold (0). Reward is 0.
+
+                        # Compute Target Q Values across ALL actions to properly train the full DQN layer
+                        with torch.no_grad():
+                            next_q_values = self.target_model(b_next_states)
+                            max_next_q, _ = next_q_values.max(1)
+
+                            # Expand target to shape (batch_size, 3)
+                            # Action 0 (Hold): reward = 0
+                            # Action 1 (Buy): reward = b_returns
+                            # Action 2 (Sell): reward = -b_returns
+                            target_q_all = torch.zeros_like(q_values)
+                            target_q_all[:, 0] = 0.0 + gamma * max_next_q
+                            target_q_all[:, 1] = b_returns + gamma * max_next_q
+                            target_q_all[:, 2] = -b_returns + gamma * max_next_q
+
+                        loss = criterion(q_values, target_q_all)
                     
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
                 else:
-                    outputs = self.model(batch_X)
-                    loss = criterion(outputs, batch_y)
+                    q_values = self.model(b_states)
+                    with torch.no_grad():
+                        next_q_values = self.target_model(b_next_states)
+                        max_next_q, _ = next_q_values.max(1)
+                        target_q_all = torch.zeros_like(q_values)
+                        target_q_all[:, 0] = 0.0 + gamma * max_next_q
+                        target_q_all[:, 1] = b_returns + gamma * max_next_q
+                        target_q_all[:, 2] = -b_returns + gamma * max_next_q
+
+                    loss = criterion(q_values, target_q_all)
                     loss.backward()
                     optimizer.step()
                     
                 total_loss += loss.item()
                 
+            # Update target model
+            if epoch % 5 == 0:
+                self.target_model.load_state_dict(self.model.state_dict())
+
             epoch_elapsed = time.time() - epoch_start_time
             avg_loss = total_loss / total_batches
             print(f"[{self.name}] Epoch {epoch+1}/{epochs} - Average Loss: {avg_loss:.4f} ({epoch_elapsed:.2f}s)")
@@ -175,11 +269,14 @@ class AIStrategy(BaseStrategy):
         rsi = Indicators.rsi(self.buffer, timeperiod=14)
         _, _, macdhist = Indicators.macd(self.buffer)
         
+        sentiment = np.zeros_like(returns)
+
         features = np.column_stack((
             returns,
             view['volume'],
             rsi,
-            macdhist
+            macdhist,
+            sentiment
         )).astype(np.float32)
 
         if hasattr(self, 'feature_mean') and hasattr(self, 'feature_std'):
@@ -189,17 +286,16 @@ class AIStrategy(BaseStrategy):
         
         recent_features = features[-self.window_size:]
 
-        # Reshape for LSTM: (batch_size, sequence_length, input_size)
+        # Reshape for Transformer: (batch_size, sequence_length, input_size)
         x_tensor = torch.tensor(recent_features, dtype=torch.float32).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
-            prediction = self.model(x_tensor)
+            q_values = self.model(x_tensor)
+            action = torch.argmax(q_values, dim=1).item()
             
-        pred_return = prediction.item()
-        
-        # Basic logic: Returns predicted natively
-        if pred_return > 0.05: # Expected > 0.05% gain
+        # Action space: 0=Hold, 1=Buy, 2=Sell
+        if action == 1:
             return 1 # BUY
-        elif pred_return < -0.05: # Expected < -0.05% loss
+        elif action == 2:
             return -1 # SELL
         return 0 # HOLD
